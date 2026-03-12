@@ -90,6 +90,7 @@ def check_duplicate_run(
             "experiment": config_dict["experiment"],
             "data": data_compare,
             "optimizer": config_dict["optimizer"],
+            "lr": config_dict["lr"],
         }
 
         # Build filters - only query finished runs, optionally within a group
@@ -896,10 +897,10 @@ def main(config: JobConfig) -> None:
     beta2 = config.optimizer.beta2
     grad_clip = config.optimizer.grad_clip
     # learning rate decay settings
-    # decay_lr = config.lr.decay_lr
     warmup_iters = config.lr.warmup_iters
-    # lr_decay_iters = config.lr.lr_decay_iters
-    # min_lr = config.lr.min_lr
+    decay_lr = config.lr.decay_lr
+    lr_decay_iters = config.lr.lr_decay_iters
+    min_lr = config.lr.min_lr
     # DDP settings
     backend = config.distributed.backend
     # system
@@ -1697,27 +1698,20 @@ def main(config: JobConfig) -> None:
         model.train()
         return out
 
-    # # learning rate decay scheduler (cosine with warmup)
-    # def get_lr(it):
-    #     # 1) linear warmup for warmup_iters steps
-    #     if it < warmup_iters:
-    #         return learning_rate * (it + 1) / (warmup_iters + 1)
-    #     # 2) if it > lr_decay_iters, return min learning rate
-    #     if it > lr_decay_iters:
-    #         return min_lr
-    #     # 3) in between, use cosine decay down to min learning rate
-    #     decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    #     assert 0 <= decay_ratio <= 1
-    #     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
-    #     return min_lr + coeff * (learning_rate - min_lr)
-
-    # learning rate decay scheduler (warmup and no decay)
     def get_lr(it):
         # 1) linear warmup for warmup_iters steps
         if it < warmup_iters:
             return learning_rate * (it + 1) / (warmup_iters + 1)
-        # 2) if it > lr_decay_iters, return target learning rate
-        return learning_rate
+        if not decay_lr:
+            return learning_rate
+        # 2) if it > lr_decay_iters, return min learning rate
+        if it > lr_decay_iters:
+            return min_lr
+        # 3) in between, use cosine decay down to min learning rate
+        decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (learning_rate - min_lr)
 
     # logging
     wandb_buffer_enabled = config.logging.wandb_buffer

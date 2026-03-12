@@ -77,10 +77,10 @@ class Optimizer:
 
 @dataclass(frozen=True)
 class LRScheduler:
-    # decay_lr: bool = True
     warmup_iters: int = 1000
-    # lr_decay_iters: int = 600000
-    # min_lr: float = 6e-5
+    decay_lr: bool = False
+    lr_decay_iters: int = 600000
+    min_lr: float = 6e-5
 
 
 @dataclass(frozen=True)
