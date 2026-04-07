@@ -968,6 +968,9 @@ def main(config: JobConfig) -> None:
     assignments_path = os.path.join(out_dir, "assignments.bin")
     permutations_path = os.path.join(out_dir, "permutations.npy")
     training_seed = config.training.seed + seed_offset
+    # Base seed without DDP rank offset — used for assignment/permutation cache paths
+    # so all ranks agree on the same file (only master generates it).
+    base_seed = config.training.seed
     # Determine data source
     use_pretokenized = config.data.source == "pretokenized"
 
@@ -991,7 +994,7 @@ def main(config: JobConfig) -> None:
             f"n{exp.n_compartments}_t{_fmt_float(max(0.0, float(exp.translation_ratio)))}_"
             f"m{exp.translation_ratio_mode}_"
             f"sc{exp.compartment_scaling}_total{int(total_examples)}_"
-            f"maxc{max_compartments_int}_seed{int(training_seed)}"
+            f"maxc{max_compartments_int}_seed{int(base_seed)}"
         )
         # Point assignments_path to cached file
         assignments_path = os.path.join(
@@ -1002,7 +1005,7 @@ def main(config: JobConfig) -> None:
         if exp.permute_tokens_per_compartment:
             if config.model.vocab_size is not None:
                 base_vocab_int = cast(int, config.model.vocab_size)
-                perms_desc = f"basev{base_vocab_int}_maxc{max_compartments_int}_seed{int(training_seed)}"
+                perms_desc = f"basev{base_vocab_int}_maxc{max_compartments_int}_seed{int(base_seed)}"
                 permutations_path = os.path.join(
                     cache_root, f"permutations_{perms_desc}.npy"
                 )
@@ -1050,7 +1053,7 @@ def main(config: JobConfig) -> None:
                                 ),
                                 total_examples=total_examples,
                                 max_compartments=max_compartments_int,
-                                seed=training_seed,
+                                seed=base_seed,
                                 no_shuffle=False,
                             )
                             os.replace(tmp_path, assignments_path)
