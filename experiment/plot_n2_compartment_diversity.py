@@ -151,7 +151,7 @@ def fig_combined(metrics):
 
 def main():
     setup_paper_style()
-    metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    metrics = json.loads(Path("val_metrics.json").read_text())
     Path("../figures").mkdir(exist_ok=True)
     fig_val(metrics)
     fig_slowdown(metrics)

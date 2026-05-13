@@ -194,7 +194,7 @@ def fig_scaling(metrics):
 def main():
     setup_paper_style()
     Path("../figures").mkdir(exist_ok=True)
-    metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    metrics = json.loads(Path("val_metrics.json").read_text())
     fig_body(metrics)
     fig_slowdown(metrics)
     fig_slowdown_c8(metrics)

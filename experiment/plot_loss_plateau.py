@@ -1,6 +1,6 @@
 """Loss-plateau chart: final val loss vs n_compartments, one line per scale.
 
-Reads fineweb_val_metrics.json. For each (scale, c) entry in PANELS, takes the
+Reads val_metrics.json. For each (scale, c) entry in PANELS, takes the
 last checkpoint's averaged compartment loss as the "final" val. Plots all
 scales on one axis; expectation is that higher c plateaus at higher val,
 and the gap is larger for smaller scales (capacity-bound).
@@ -69,7 +69,7 @@ def plot_into(ax, metrics):
 
 def main():
     setup_paper_style()
-    metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    metrics = json.loads(Path("val_metrics.json").read_text())
     fig, ax = plt.subplots(figsize=(3.3, 2.6))
     plot_into(ax, metrics)
     handles, labels = ax.get_legend_handles_labels()

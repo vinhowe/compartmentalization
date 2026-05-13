@@ -35,7 +35,7 @@ This is the fast path. Download the eval JSONs from Zenodo, drop them in
    uv sync
    ```
 2. **Get the JSONs.** Zenodo DOI `<TODO>`. Unpack into `experiment/`:
-   - `fineweb_val_metrics.json` — per-checkpoint val loss for every paper run
+   - `val_metrics.json` — per-checkpoint val loss for every paper run
    - `finetune_val_metrics.json` — finetune-from-c=1 trajectory
    - `cossim_sweep.json`, `cossim_across_training.json` — layer-4 cross-compartment cosine similarity
    - `multilingual_24_{512,768,1024}_per_lang.json` — multilingual case study
@@ -82,7 +82,7 @@ After training finishes, the eval pipeline lives in `experiment/`:
 ```
 cd experiment
 python evaluate_checkpoints_fineweb_dedup.py  # per-rank shards
-python merge_eval_results.py                  # merges → fineweb_val_metrics.json
+python merge_eval_results.py                  # merges → val_metrics.json
 ```
 
 ## T3 — Retrain a grid (sweep)

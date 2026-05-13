@@ -31,7 +31,7 @@ C1_BASELINE_KEY = C1_BASELINE_8_256
 
 def collect_cells():
     """Return list[dict] with one entry per (run, last-step val). Effective tr."""
-    m = json.loads(Path("fineweb_val_metrics.json").read_text())
+    m = json.loads(Path("val_metrics.json").read_text())
     out = []
     for g in ["bpe16384-rope-wd-n2", "bpe16384-rope-wd-n3-n8", "bpe16384-rope-8-256"]:
         for d in sorted((Path("..") / "out" / "translation-compression" / g).iterdir()):
@@ -103,7 +103,7 @@ def panel_wd_for_c(ax, cells, target_c, c1_floor, title=None):
 def main():
     setup_paper_style()
     cells = collect_cells()
-    main_metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    main_metrics = json.loads(Path("val_metrics.json").read_text())
     c1_floor = main_metrics[C1_BASELINE_KEY]["metrics"]["loss_compartment_0"][-1]
 
     Path("../figures").mkdir(exist_ok=True)

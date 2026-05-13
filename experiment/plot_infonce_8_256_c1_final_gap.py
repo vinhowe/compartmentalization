@@ -62,7 +62,7 @@ STEP_MATCH_DROP = {5}
 
 
 def render(figsize, fontsize_tweak=False, step_match=False, drop_c5=False):
-    metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    metrics = json.loads(Path("val_metrics.json").read_text())
     Path("../figures").mkdir(exist_ok=True)
     fig, ax = plt.subplots(figsize=figsize)
 

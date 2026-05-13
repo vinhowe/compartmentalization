@@ -34,7 +34,7 @@ def collect_matched_val():
     Interpolated in log-step from each cell's trajectory. Now that all
     trajectories use 10-batch-averaged eval, bf16 named-checkpoint noise is
     suppressed enough to interpolate cleanly across them."""
-    m = json.loads(Path("fineweb_val_metrics.json").read_text())
+    m = json.loads(Path("val_metrics.json").read_text())
     out = defaultdict(list)
     c1 = None
     for d in sorted((Path("..") / "out" / "translation-compression" / "1b-scale").iterdir()):
@@ -120,7 +120,7 @@ def panel_target_trajectories(ax):
     tr=0.167 as a contrast that converges even faster despite less translation
     data, because the c=2 model has more capacity per compartment."""
     import json, numpy as np
-    m = json.loads(Path("fineweb_val_metrics.json").read_text())
+    m = json.loads(Path("val_metrics.json").read_text())
 
     # No artificial start clip — show whatever steps each line has data for.
     # Abs runs only have rsync'd ckpts from step 7k onward; long-trajectory

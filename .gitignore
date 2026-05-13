@@ -23,7 +23,7 @@ tokenizer/
 # Eval / wandb / logging
 wandb/
 logs/
-experiment/fineweb_val_metrics_gpu*.json
+experiment/val_metrics_gpu*.json
 experiment/*.bak
 experiment/*.json.bak
 experiment/*.json.bak-*
@@ -36,7 +36,7 @@ experiment/*.json.old
 experiment/*.corrupted.bak
 
 # Precomputed eval JSONs (shipped via Zenodo, not in git)
-experiment/fineweb_val_metrics.json
+experiment/val_metrics.json
 experiment/finetune_val_metrics.json
 experiment/cossim_sweep.json
 experiment/cossim_across_training.json
@@ -50,7 +50,7 @@ experiment/finetune_offset_checkpoints/
 experiment/ntk_probe_sets/
 experiment/out
 experiment/pccl
-experiment/fineweb_val_metrics.json.bak_*
+experiment/val_metrics.json.bak_*
 experiment/token_counts_cache*
 experiment/token_curve_data/
 experiment/token_variance_data/

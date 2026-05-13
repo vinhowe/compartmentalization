@@ -2,7 +2,7 @@
 relative to the c=1 (rope, no-comp) baseline at each scale.
 
 For each (scale, c=N>1) pair:
-  - Pull both trajectories of (iter, val_loss) from fineweb_val_metrics.json.
+  - Pull both trajectories of (iter, val_loss) from val_metrics.json.
   - For every original checkpoint on either model whose val_loss falls in the
     overlap of realized val_loss ranges, linearly interpolate the matching
     iter on the other model and compute slowdown = iter_compartmented /
@@ -183,7 +183,7 @@ def fig_compact(metrics, panel, out_path: Path, *, x_axis="val"):
 
 def main():
     setup_paper_style()
-    metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    metrics = json.loads(Path("val_metrics.json").read_text())
     Path("../figures").mkdir(exist_ok=True)
     fig_all(metrics, Path("../figures/slowdown_compartmented_all.pdf"))
     # Last 3 scales as separate single-panel PDFs.

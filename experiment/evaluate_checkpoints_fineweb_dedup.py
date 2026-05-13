@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument('--rank', type=int, default=0, help='GPU rank (0-indexed)')
     parser.add_argument('--world-size', type=int, default=1, help='Number of parallel workers')
     parser.add_argument('--use-prefilled-checkpoints', action='store_true',
-                        help='Only evaluate checkpoints already listed in fineweb_val_metrics.json')
+                        help='Only evaluate checkpoints already listed in val_metrics.json')
     parser.add_argument('--loggy-checkpoints', action='store_true',
                         help='Only evaluate log-spaced checkpoints: 100, 850, 3500, 7000, 14000, 29000, 60000, 120000, 240000, 500000, 1000000')
     parser.add_argument('--sweeps', type=str, default=None,
@@ -325,8 +325,8 @@ if __name__ == "__main__":
     # Load original file for resume state (read-only reference)
     # Also used to get pre-filled checkpoints when --use-prefilled-checkpoints is set
     original_metrics = {}
-    if Path("fineweb_val_metrics.json").exists():
-        with open("fineweb_val_metrics.json", "r") as f:
+    if Path("val_metrics.json").exists():
+        with open("val_metrics.json", "r") as f:
             original_metrics = json.load(f)
 
     experiment_paths = list(path_to_run_name.keys())
@@ -372,12 +372,12 @@ if __name__ == "__main__":
     print(f"[Rank {args.rank}/{args.world_size}] Processing {len(experiments)} of {len(all_experiments)} experiments")
 
     # Load per-GPU file for this run's state
-    output_file = Path(f"fineweb_val_metrics_gpu{args.rank}.json")
+    output_file = Path(f"val_metrics_gpu{args.rank}.json")
     if output_file.exists():
         with open(output_file, "r") as f:
-            fineweb_val_metrics = json.load(f)
+            val_metrics = json.load(f)
     else:
-        fineweb_val_metrics = {}
+        val_metrics = {}
 
     def is_checkpoint_done(experiment_key, checkpoint):
         """Check if a checkpoint is already done in either original or per-GPU metrics.
@@ -385,7 +385,7 @@ if __name__ == "__main__":
         A checkpoint is considered done only if it's in the checkpoints list AND
         there are corresponding metrics (i.e., metrics list length >= checkpoint index + 1).
         """
-        for source in [fineweb_val_metrics, original_metrics]:
+        for source in [val_metrics, original_metrics]:
             if experiment_key in source:
                 ckpts = source[experiment_key].get("checkpoints", [])
                 if checkpoint in ckpts:
@@ -401,8 +401,8 @@ if __name__ == "__main__":
 
     def get_existing_metrics(experiment_key):
         """Get existing metrics for an experiment, preferring per-GPU file over original."""
-        if experiment_key in fineweb_val_metrics:
-            return fineweb_val_metrics[experiment_key]
+        if experiment_key in val_metrics:
+            return val_metrics[experiment_key]
         if experiment_key in original_metrics:
             return original_metrics[experiment_key]
         return {}
@@ -726,7 +726,7 @@ if __name__ == "__main__":
             "checkpoints": sorted(list(checkpoints)),
             "data_source": "uniform" if use_uniform_data else "pretokenized",
         }
-        fineweb_val_metrics[experiment] = experiment_result
+        val_metrics[experiment] = experiment_result
 
         # Do this every experiment so if things crash, we're okay.
         # Write to per-GPU file (atomic: write temp file, then rename)
@@ -735,7 +735,7 @@ if __name__ == "__main__":
         fd, tmp_path = tempfile.mkstemp(dir=output_file.parent, suffix=".tmp")
         try:
             with open(fd, "w") as f:
-                json.dump(fineweb_val_metrics, f, indent=4)
+                json.dump(val_metrics, f, indent=4)
             Path(tmp_path).replace(output_file)
         except BaseException:
             Path(tmp_path).unlink(missing_ok=True)

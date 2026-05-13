@@ -58,7 +58,7 @@ STEP_MATCH_CAP = 1_580_000
 
 
 def _render(figsize, fontsize_tweak=False, xmax=STEP_MATCH_CAP):
-    metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    metrics = json.loads(Path("val_metrics.json").read_text())
     fig, ax = plt.subplots(figsize=figsize)
 
     s_c1, l_c1 = parse_baseline(metrics, C1_BASELINE_KEY, 1)

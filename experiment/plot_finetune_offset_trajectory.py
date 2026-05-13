@@ -41,7 +41,7 @@ def avg_compartment_arr(metrics: dict, c: int, n_steps: int) -> np.ndarray:
 def main():
     setup_paper_style()
     Path("../figures").mkdir(exist_ok=True)
-    main_metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    main_metrics = json.loads(Path("val_metrics.json").read_text())
     ft = json.loads(Path("finetune_val_metrics.json").read_text())
 
     fig, ax = plt.subplots(figsize=(4.5, 3.0))

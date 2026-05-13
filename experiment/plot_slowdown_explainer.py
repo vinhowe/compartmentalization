@@ -36,7 +36,7 @@ def get_curve(metrics, key, c):
 
 def main():
     setup_paper_style()
-    metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    metrics = json.loads(Path("val_metrics.json").read_text())
     Path("../figures").mkdir(exist_ok=True)
 
     s_base, l_base = get_curve(metrics, KEY_C1, 1)

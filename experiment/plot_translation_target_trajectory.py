@@ -33,7 +33,7 @@ TARGET_TR = 0.5  # fixed translation ratio for the trajectory chart
 
 def main():
     setup_paper_style()
-    metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    metrics = json.loads(Path("val_metrics.json").read_text())
     Path("../figures").mkdir(exist_ok=True)
 
     # Find one cell per c at the target tr (absolute mode, wd=0)

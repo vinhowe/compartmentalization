@@ -1,7 +1,7 @@
 """Run identifiers referenced by the paper plot/compute scripts.
 
 These point at entries in the precomputed eval JSONs we ship via Zenodo
-(`fineweb_val_metrics.json`, `cossim_sweep.json`, `cossim_across_training.json`,
+(`val_metrics.json`, `cossim_sweep.json`, `cossim_across_training.json`,
 `finetune_val_metrics.json`, `multilingual_*_per_lang.json`, plus the
 training-time val-loss logs in `.multirun/*.log`).
 

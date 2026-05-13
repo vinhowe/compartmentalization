@@ -49,7 +49,7 @@ RUNS = [
 
 
 def get_baseline_finals():
-    m = json.loads(Path("fineweb_val_metrics.json").read_text())
+    m = json.loads(Path("val_metrics.json").read_text())
     c1 = m[C1_BASELINE_KEY]["metrics"]["loss_compartment_0"][-1]
     v2 = m[C2_BASELINE_KEY]
     losses = np.mean(

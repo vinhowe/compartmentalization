@@ -9,7 +9,7 @@ Sources: synthetic-compartment-baselines (c=1, d≤256), bpe16384-rope-8-256
 (c≥2, d=256), bpe16384-rope-small-scale-tr01-epoch (d∈{32,64,128} c≥2),
 bpe16384-rope-8-512-sweep (d=512), 1b-scale (1B). 1B only has c∈{1,2,8}.
 
-Reads fineweb_val_metrics.json. Averages val loss across compartments.
+Reads val_metrics.json. Averages val loss across compartments.
 Paper-ready vector PDF, log-log axes.
 """
 from __future__ import annotations
@@ -100,7 +100,7 @@ def d_label(d: int) -> str:
 
 def main():
     setup_paper_style()
-    metrics = json.loads(Path("fineweb_val_metrics.json").read_text())
+    metrics = json.loads(Path("val_metrics.json").read_text())
     fig, axes = plt.subplots(2, 3, figsize=(7.0, 4.4), sharex=True)
     flat = axes.flatten()
     for i, (d, runs) in enumerate(PANELS):

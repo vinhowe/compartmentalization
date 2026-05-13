@@ -29,7 +29,7 @@ TR_TARGET = 0.75
 
 def collect_val_at_tr075():
     """Return dict {c: [(wd, val), ...]} for absolute-mode tr=0.75 cells."""
-    m = json.loads(Path("fineweb_val_metrics.json").read_text())
+    m = json.loads(Path("val_metrics.json").read_text())
     out = defaultdict(dict)  # c -> wd -> list of vals (best across seeds)
     for g in ["bpe16384-rope-wd-n2", "bpe16384-rope-wd-n3-n8", "bpe16384-rope-8-256"]:
         for d in sorted((Path("..") / "out" / "translation-compression" / g).iterdir()):
@@ -101,7 +101,7 @@ def main():
     cossim_by_c = collect_cossim_at_tr075()
 
     # c=1 floor
-    m = json.loads(Path("fineweb_val_metrics.json").read_text())
+    m = json.loads(Path("val_metrics.json").read_text())
     c1_floor = m[C1_BASELINE_8_256]["metrics"]["loss_compartment_0"][-1]
 
     # Render each panel as a separate compact PDF for subfigure inclusion.

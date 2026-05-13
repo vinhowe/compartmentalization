@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Merge per-GPU evaluation result files into a single fineweb_val_metrics.json.
+Merge per-GPU evaluation result files into a single val_metrics.json.
 
 This script:
-1. Loads the original fineweb_val_metrics.json (preserves existing data)
-2. Loads each per-GPU file (fineweb_val_metrics_gpu{0-7}.json)
+1. Loads the original val_metrics.json (preserves existing data)
+2. Loads each per-GPU file (val_metrics_gpu{0-7}.json)
 3. Merges them, with per-GPU results overriding original for same experiment key
-4. Writes the merged result back to fineweb_val_metrics.json
+4. Writes the merged result back to val_metrics.json
 """
 
 import argparse
@@ -25,7 +25,7 @@ def backup_file(path: Path) -> None:
 
 def merge_results(world_size: int = 8, cleanup: bool = False):
     """Merge per-GPU result files into a single metrics file."""
-    original_file = Path("fineweb_val_metrics.json")
+    original_file = Path("val_metrics.json")
 
     # Start with original data (preserves existing results)
     merged = {}
@@ -39,7 +39,7 @@ def merge_results(world_size: int = 8, cleanup: bool = False):
     gpu_files_found = 0
     experiments_updated = 0
     for rank in range(world_size):
-        gpu_file = Path(f"fineweb_val_metrics_gpu{rank}.json")
+        gpu_file = Path(f"val_metrics_gpu{rank}.json")
         if gpu_file.exists():
             gpu_files_found += 1
             print(f"Loading per-GPU file: {gpu_file}")
@@ -73,7 +73,7 @@ def merge_results(world_size: int = 8, cleanup: bool = False):
     if cleanup:
         print("\nCleaning up per-GPU files...")
         for rank in range(world_size):
-            gpu_file = Path(f"fineweb_val_metrics_gpu{rank}.json")
+            gpu_file = Path(f"val_metrics_gpu{rank}.json")
             if gpu_file.exists():
                 gpu_file.unlink()
                 print(f"  Removed {gpu_file}")
