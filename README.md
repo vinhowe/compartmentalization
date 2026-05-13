@@ -1,9 +1,8 @@
-# Translation-compression: code release
+# Language models struggle with compartmentalization
 
-Companion code for *Language models struggle with compartmentalization*
-(preprint). Reproduces every figure in the paper from the precomputed
-eval JSONs we ship via Zenodo, and lets you retrain any individual run
-via `train.py` / `sweep_runner.py`.
+Companion code for the paper of the same name (preprint). Reproduces
+every figure from the precomputed eval JSONs we ship via Zenodo, and
+lets you retrain any individual run via `train.py` / `sweep_runner.py`.
 
 ## What's in here
 
