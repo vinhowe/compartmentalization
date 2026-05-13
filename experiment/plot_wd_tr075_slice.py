@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style, C_COLOR
+from _run_paths import C1_BASELINE_8_256
 
 
 C_LIST = [5, 6, 8]
@@ -101,10 +102,7 @@ def main():
 
     # c=1 floor
     m = json.loads(Path("fineweb_val_metrics.json").read_text())
-    c1_key = ("synthetic-compartment-baselines/"
-              "2026-03-06T18-11-45Z__english-baseline-rope-bpe16384-8-256"
-              "__2df56182__s64__4b68526__51c738c2")
-    c1_floor = m[c1_key]["metrics"]["loss_compartment_0"][-1]
+    c1_floor = m[C1_BASELINE_8_256]["metrics"]["loss_compartment_0"][-1]
 
     # Render each panel as a separate compact PDF for subfigure inclusion.
     fig, ax = plt.subplots(figsize=(3.5, 2.3))

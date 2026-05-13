@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style
+from _run_paths import RUN_1B_C2_TR0_167, RUN_1B_C8_TR0_056, RUNS_1B_C8_ABS_BY_TR
 
 
 C2_COLOR = "tab:blue"
@@ -128,10 +129,10 @@ def panel_target_trajectories(ax):
     # c=8 family: viridis from light (tr=0.056) to dark (tr=0.75).
     cmap = plt.get_cmap("viridis")
     C8_RUNS = [
-        (0.056, "1b-scale/2026-04-12T04-30-30Z__1b-8comp-bpe16384-correct__47875262__s64__75a29e5__c1a66f59"),
-        (0.25,  "1b-scale/2026-04-28T07-25-54Z__1b-8comp-tr025abs-bpe16384__7f828f8a__s64__75a29e5__10e98f4e"),
-        (0.5,   "1b-scale/2026-04-27T23-16-17Z__1b-8comp-tr05abs-bpe16384__8c45bf62__s64__75a29e5__984e0ac2"),
-        (0.75,  "1b-scale/2026-04-27T23-16-44Z__1b-8comp-tr075abs-bpe16384__cf2767fd__s64__75a29e5__36396f38"),
+        (0.056, RUN_1B_C8_TR0_056),
+        (0.25,  RUNS_1B_C8_ABS_BY_TR[0.25]),
+        (0.5,   RUNS_1B_C8_ABS_BY_TR[0.5]),
+        (0.75,  RUNS_1B_C8_ABS_BY_TR[0.75]),
     ]
     for i, (tr, k) in enumerate(C8_RUNS):
         v = m.get(k, {})
@@ -151,7 +152,7 @@ def panel_target_trajectories(ax):
                 markersize=2.5, linewidth=1.3, label=f"c=8, tr={tr:g}")
 
     # c=2 contrast.
-    k = "1b-scale/2026-04-14T20-35-26Z__1b-2comp-bpe16384-correct__586efbbc__s64__75a29e5__6c0d1003"
+    k = RUN_1B_C2_TR0_167
     v = m.get(k, {})
     if v:
         steps = np.array(v["checkpoints"], dtype=float)

@@ -26,57 +26,27 @@ import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style, avg_compartment_loss
 from plot_compartmented_slowdown import slowdown_points
+from _run_paths import (
+    C1_BASELINE_8_256, C1_BASELINE_BY_SCALE,
+    NO_INFONCE_8_256_BY_C, COPYEMB_8_256_BY_C, COPYEMB_C2_BY_SCALE,
+    RUNS_SMALL_SCALE_TR01,
+)
 
 
-# 8-256 keys for the main body chart
-KEY_C1_8_256 = (
-    "synthetic-compartment-baselines/"
-    "2026-03-06T18-11-45Z__english-baseline-rope-bpe16384-8-256"
-    "__2df56182__s64__4b68526__51c738c2"
-)
-KEY_C2_RAND_8_256 = "bpe16384-rope-8-256/217ca694_s64"
-KEY_C2_COPYEMB_8_256 = (
-    "synthetic-compartment-baselines/"
-    "2026-03-11T06-39-01Z__english-copyemb-2comp-rope-bpe16384-8-256"
-    "__55197561__s64__4b68526__09338b7c"
-)
-KEY_C8_RAND_8_256 = "bpe16384-rope-8-256/868ef4a8_s64"
-KEY_C8_COPYEMB_8_256 = (
-    "synthetic-compartment-baselines/"
-    "2026-03-11T23-33-54Z__english-copyemb-8comp-rope-bpe16384-8-256"
-    "__28f1b316__s64__4b68526__8fa7f919"
-)
+KEY_C1_8_256 = C1_BASELINE_8_256
+KEY_C2_RAND_8_256 = NO_INFONCE_8_256_BY_C[2]
+KEY_C2_COPYEMB_8_256 = COPYEMB_8_256_BY_C[2]
+KEY_C8_RAND_8_256 = NO_INFONCE_8_256_BY_C[8]
+KEY_C8_COPYEMB_8_256 = COPYEMB_8_256_BY_C[8]
+
+def _c2_rand_for_scale(d):
+    return NO_INFONCE_8_256_BY_C[2] if d == 256 else RUNS_SMALL_SCALE_TR01[(d, 2)]
+
 
 # Scaling: c=2 copyemb at d ∈ {32, 64, 128, 256} + c=1 baseline + c=2 random
 SCALING = [
-    (32,  87.2 * 0.013,  # placeholder, we'll use proper params per scale
-        ("synthetic-compartment-baselines/"
-         "2026-03-06T18-19-13Z__english-baseline-rope-bpe16384-8-32"
-         "__41ba658f__s64__4b68526__66b66981"),
-        "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-14Z__8-32-n2-tr01__276e6011__s64__fd9c538__fc9992cd",
-        ("synthetic-compartment-baselines/"
-         "2026-03-11T06-39-22Z__english-copyemb-2comp-rope-bpe16384-8-32"
-         "__e362045d__s64__4b68526__55aa6f95"),
-    ),
-    (64, 0,
-        ("synthetic-compartment-baselines/"
-         "2026-03-06T18-18-46Z__english-baseline-rope-bpe16384-8-64"
-         "__50fa3055__s64__4b68526__007674d4"),
-        "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-64-n2-tr01__a654d23e__s64__fd9c538__4bc16fd9",
-        ("synthetic-compartment-baselines/"
-         "2026-03-11T06-39-12Z__english-copyemb-2comp-rope-bpe16384-8-64"
-         "__c148c701__s64__4b68526__675100fa"),
-    ),
-    (128, 0,
-        ("synthetic-compartment-baselines/"
-         "2026-03-06T18-17-16Z__english-baseline-rope-bpe16384-8-128"
-         "__bafaffdf__s64__4b68526__e939a660"),
-        "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-128-n2-tr01__29620da8__s64__fd9c538__e33f2900",
-        ("synthetic-compartment-baselines/"
-         "2026-03-11T06-39-05Z__english-copyemb-2comp-rope-bpe16384-8-128"
-         "__2510e3fb__s64__4b68526__a830bae0"),
-    ),
-    (256, 0, KEY_C1_8_256, KEY_C2_RAND_8_256, KEY_C2_COPYEMB_8_256),
+    (d, C1_BASELINE_BY_SCALE[d], _c2_rand_for_scale(d), COPYEMB_C2_BY_SCALE[d])
+    for d in (32, 64, 128, 256)
 ]
 SCALE_PARAMS_M = {32: 1.15, 64: 2.49, 128: 5.77, 256: 14.69}
 
@@ -185,7 +155,7 @@ def fig_scaling(metrics):
     fig, ax = plt.subplots(figsize=(3.3, 2.6))
     xs = []
     pts = {"c=1 baseline": [], "c=2 default init": [], "c=2 init copying": []}
-    for d, _, c1_key, c2_rand_key, c2_copyemb_key in SCALING:
+    for d, c1_key, c2_rand_key, c2_copyemb_key in SCALING:
         params_m = SCALE_PARAMS_M[d]
         xs.append(params_m)
         for label, key, c in [

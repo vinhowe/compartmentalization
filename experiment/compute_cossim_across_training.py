@@ -17,30 +17,15 @@ import torch
 sys.path.insert(0, "..")
 from eval_utils import load_eval_model_from_checkpoint
 from compute_cossim_sweep import load_canonical_batch, mean_cossim, BASE_VOCAB, DEFAULT_LAYER
+from _run_paths import INFONCE_8_256_BY_C, NO_INFONCE_8_256_BY_C, OUT_ROOT
 
 
-PROJECT_ROOT = Path("..")
-OUT_BASE = PROJECT_ROOT / "out" / "translation-compression"
+OUT_BASE = OUT_ROOT
 LAYER = 4
 
 # (label, c, group/run_dir)
-RUNS = [
-    ("infonce_n2", 2,
-     "bpe16384-8-256-infonce/2026-05-02T18-30-47Z__8-256-n2-tr0-infonce__3d28d6ba__s64__fd9c538__e7c1f136"),
-    ("infonce_n4", 4,
-     "bpe16384-8-256-infonce/2026-05-02T18-30-52Z__8-256-n4-tr0-infonce__27749b37__s64__fd9c538__3b53c824"),
-    ("infonce_n5", 5,
-     "bpe16384-8-256-infonce/2026-05-06T15-33-54Z__8-256-n5-tr0-infonce__62841be1__s64__fd9c538__27aba970"),
-    ("infonce_n6", 6,
-     "bpe16384-8-256-infonce/2026-05-05T00-40-58Z__8-256-n6-tr0-infonce__c722a6f7__s64__fd9c538__b4886e56"),
-    ("infonce_n8", 8,
-     "bpe16384-8-256-infonce/2026-05-02T18-30-47Z__8-256-n8-tr0-infonce__1ed1536b__s64__fd9c538__4ff10c8e"),
-    ("baseline_n2", 2, "bpe16384-rope-8-256/217ca694_s64"),
-    ("baseline_n4", 4, "bpe16384-rope-8-256/53e73c3d_s64"),
-    ("baseline_n5", 5, "bpe16384-rope-8-256/918122e2_s64"),
-    ("baseline_n6", 6, "bpe16384-rope-8-256/b4d95a94_s64"),
-    ("baseline_n8", 8, "bpe16384-rope-8-256/868ef4a8_s64"),
-]
+RUNS = [(f"infonce_n{c}", c, INFONCE_8_256_BY_C[c]) for c in (2, 4, 5, 6, 8)] + \
+       [(f"baseline_n{c}", c, NO_INFONCE_8_256_BY_C[c]) for c in (2, 4, 5, 6, 8)]
 
 
 def list_named_steps(run_dir: Path) -> list[int]:

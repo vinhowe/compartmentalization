@@ -26,6 +26,38 @@ logs/
 experiment/fineweb_val_metrics_gpu*.json
 experiment/*.bak
 experiment/*.json.bak
+experiment/*.json.bak-*
+experiment/*.json.bak2
+experiment/*.json.bak3
+experiment/*.json.bak4
+experiment/*.json.bak5
+experiment/*.json.bak6
+experiment/*.json.old
+experiment/*.corrupted.bak
+
+# Precomputed eval JSONs (shipped via Zenodo, not in git)
+experiment/fineweb_val_metrics.json
+experiment/finetune_val_metrics.json
+experiment/cossim_sweep.json
+experiment/cossim_across_training.json
+experiment/multilingual_*_per_lang.json
+experiment/multilingual_val_curves_no_infonce.json
+experiment/per_token_cosine_cache.npz
+
+# Checkpoint sandboxes inside experiment/
+experiment/finetune_checkpoints/
+experiment/finetune_offset_checkpoints/
+experiment/ntk_probe_sets/
+experiment/out
+experiment/pccl
+experiment/fineweb_val_metrics.json.bak_*
+experiment/token_counts_cache*
+experiment/token_curve_data/
+experiment/token_variance_data/
+experiment/russian_en_ru_compartment_eval.json
+experiment/staged_results.json
+experiment/staged_unification*
+experiment/run_*.sh
 
 # Sweep runtime state (yamls themselves are tracked)
 sweeps/.active
@@ -41,6 +73,20 @@ scratch/
 core.*
 *.zip
 nohup.out
+output.png
+profile_trace.json
+
+# Paper TeX / infra (lives outside the code release)
+*.tex
+machines.toml
+run_sweep_gpu.sh
+tokenizers/
+"Interactive - "*.ipynb
+bpe16384_experiments.txt
+NeurIPS_Compartmentalization.zip
+bio_extraction_eval.json
+app.py
+collect_feature_activations.py
 
 # Exploratory subprojects not in paper
 interpretability/

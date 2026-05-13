@@ -23,6 +23,12 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 import matplotlib.pyplot as _plt
 
+from _run_paths import (
+    C1_BASELINE_BY_SCALE, RUNS_SMALL_SCALE_TR01, RUNS_N3_ROPE,
+    NO_INFONCE_8_256_BY_C, RUN_8_256_C1_EXTRA, RUNS_8_512_LEGACY_BY_C,
+    RUN_1B_C1_BASELINE, RUN_1B_C2_NOTRANS, RUN_1B_C8_NOTRANS,
+)
+
 
 def setup_paper_style():
     rcParams.update({
@@ -38,56 +44,36 @@ def setup_paper_style():
 
 
 # (d_model, [(c, key), ...])
+def _panel_small(d, n3_key):
+    return [
+        (1, C1_BASELINE_BY_SCALE[d]),
+        (2, RUNS_SMALL_SCALE_TR01[(d, 2)]),
+        (3, n3_key),
+        (4, RUNS_SMALL_SCALE_TR01[(d, 4)]),
+        (5, RUNS_SMALL_SCALE_TR01[(d, 5)]),
+        (6, RUNS_SMALL_SCALE_TR01[(d, 6)]),
+        (8, RUNS_SMALL_SCALE_TR01[(d, 8)]),
+    ]
+
+
 PANELS = [
-    (32, [
-        (1, "synthetic-compartment-baselines/2026-03-06T18-19-13Z__english-baseline-rope-bpe16384-8-32__41ba658f__s64__4b68526__66b66981"),
-        (2, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-14Z__8-32-n2-tr01__276e6011__s64__fd9c538__fc9992cd"),
-        (3, "bpe16384-n3-rope/b7d883ff_s64"),
-        (4, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-15Z__8-32-n4-tr01__182e8587__s64__fd9c538__87cfdd84"),
-        (5, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-15Z__8-32-n5-tr01__5fe56681__s64__fd9c538__64ba6d8f"),
-        (6, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T21-46-13Z__8-32-n6-tr01__d3d70929__s64__fd9c538__6ff7bf7e"),
-        (8, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-32-n8-tr01__3de8c1bc__s64__fd9c538__28614139"),
-    ]),
-    (64, [
-        (1, "synthetic-compartment-baselines/2026-03-06T18-18-46Z__english-baseline-rope-bpe16384-8-64__50fa3055__s64__4b68526__007674d4"),
-        (2, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-64-n2-tr01__a654d23e__s64__fd9c538__4bc16fd9"),
-        (3, "bpe16384-n3-rope/9f60d15d_s64"),
-        (4, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-15Z__8-64-n4-tr01__1f914b4a__s64__fd9c538__2921ef4c"),
-        (5, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-14Z__8-64-n5-tr01__81cf31a3__s64__fd9c538__faac50d4"),
-        (6, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-14Z__8-64-n6-tr01__701205b7__s64__fd9c538__a00c89fe"),
-        (8, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-64-n8-tr01__bb0b7e57__s64__fd9c538__ebbb76e1"),
-    ]),
-    (128, [
-        (1, "synthetic-compartment-baselines/2026-03-06T18-17-16Z__english-baseline-rope-bpe16384-8-128__bafaffdf__s64__4b68526__e939a660"),
-        (2, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-128-n2-tr01__29620da8__s64__fd9c538__e33f2900"),
-        (3, "bpe16384-n3-rope/4bb14425_s64"),
-        (4, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-128-n4-tr01__fdd9ff02__s64__fd9c538__2eba5b2e"),
-        (5, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-128-n5-tr01__1ec60abf__s64__fd9c538__7a44f455"),
-        (6, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-128-n6-tr01__a6e55f01__s64__fd9c538__309edd86"),
-        (8, "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-128-n8-tr01__0caca982__s64__fd9c538__be47d71b"),
-    ]),
+    (32,  _panel_small(32,  RUNS_N3_ROPE[2])),
+    (64,  _panel_small(64,  RUNS_N3_ROPE[1])),
+    (128, _panel_small(128, RUNS_N3_ROPE[0])),
     (256, [
-        (1, "synthetic-compartment-baselines/2026-03-06T18-11-45Z__english-baseline-rope-bpe16384-8-256__2df56182__s64__4b68526__51c738c2"),
-        (2, "bpe16384-rope-8-256/217ca694_s64"),
-        (3, "bpe16384-rope-8-256/c5ac7e54_s64"),
-        (4, "bpe16384-rope-8-256/53e73c3d_s64"),
-        (5, "bpe16384-rope-8-256/918122e2_s64"),
-        (6, "bpe16384-rope-8-256/b4d95a94_s64"),
-        (8, "bpe16384-rope-8-256/868ef4a8_s64"),
+        (1, C1_BASELINE_BY_SCALE[256]),
+        (2, NO_INFONCE_8_256_BY_C[2]),
+        (3, RUN_8_256_C1_EXTRA),
+        (4, NO_INFONCE_8_256_BY_C[4]),
+        (5, NO_INFONCE_8_256_BY_C[5]),
+        (6, NO_INFONCE_8_256_BY_C[6]),
+        (8, NO_INFONCE_8_256_BY_C[8]),
     ]),
-    (512, [
-        (1, "bpe16384-rope-8-512-sweep/2026-04-27T22-12-00Z__8-512-n1-tr0__6a459969__s64__fd9c538__cd128e95"),
-        (2, "bpe16384-rope-8-512-sweep/2026-04-27T22-12-03Z__8-512-n2-tr01__1ac70722__s64__fd9c538__959443a0"),
-        (3, "bpe16384-rope-8-512-sweep/2026-04-27T22-12-00Z__8-512-n3-tr01__de18a18b__s64__fd9c538__bdbec307"),
-        (4, "bpe16384-rope-8-512-sweep/2026-04-27T22-12-00Z__8-512-n4-tr01__79908dbc__s64__fd9c538__c785cc59"),
-        (5, "bpe16384-rope-8-512-sweep/2026-04-27T22-12-06Z__8-512-n5-tr01__cff4ea6b__s64__fd9c538__716a61dc"),
-        (6, "bpe16384-rope-8-512-sweep/2026-04-27T22-12-01Z__8-512-n6-tr01__490675c3__s64__fd9c538__464afe7c"),
-        (8, "bpe16384-rope-8-512-sweep/2026-04-27T22-12-00Z__8-512-n8-tr01__a7ddefbd__s64__fd9c538__198f3d6b"),
-    ]),
+    (512, [(c, RUNS_8_512_LEGACY_BY_C[c]) for c in (1, 2, 3, 4, 5, 6, 8)]),
     (1024, [
-        (1, "1b-scale/2026-04-11T20-29-41Z__1b-1comp-baseline-bpe16384__9e005d30__s64__75a29e5__3acd587e"),
-        (2, "1b-scale/2026-04-14T20-06-42Z__1b-2comp-notrans-bpe16384-correct__836ab6ce__s64__75a29e5__55830146"),
-        (8, "1b-scale/2026-04-11T20-30-51Z__1b-8comp-notrans-bpe16384-correct__9c199809__s64__75a29e5__596929d1"),
+        (1, RUN_1B_C1_BASELINE),
+        (2, RUN_1B_C2_NOTRANS),
+        (8, RUN_1B_C8_NOTRANS),
     ]),
 ]
 

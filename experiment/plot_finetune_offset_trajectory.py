@@ -20,19 +20,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style
+from _run_paths import C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C
 
 
-N1_BASELINE_KEY = (
-    "synthetic-compartment-baselines/"
-    "2026-03-06T18-11-45Z__english-baseline-rope-bpe16384-8-256"
-    "__2df56182__s64__4b68526__51c738c2"
-)
+N1_BASELINE_KEY = C1_BASELINE_8_256
 
 # (c, scratch_baseline_key, ft_metrics_key, color, marker)
 ROWS = [
-    (2, "bpe16384-rope-8-256/217ca694_s64", "ce-full-2comp-rope", "tab:blue",  "o"),
-    (4, "bpe16384-rope-8-256/53e73c3d_s64", "ce-full-4comp-rope", "tab:green", "s"),
-    (8, "bpe16384-rope-8-256/868ef4a8_s64", "ce-full-8comp-rope", "tab:red",   "^"),
+    (2, NO_INFONCE_8_256_BY_C[2], "ce-full-2comp-rope", "tab:blue",  "o"),
+    (4, NO_INFONCE_8_256_BY_C[4], "ce-full-4comp-rope", "tab:green", "s"),
+    (8, NO_INFONCE_8_256_BY_C[8], "ce-full-8comp-rope", "tab:red",   "^"),
 ]
 
 

@@ -23,12 +23,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style, C_COLOR
+from _run_paths import C1_BASELINE_8_256
 
 
-C1_BASELINE_KEY = (
-    "synthetic-compartment-baselines/"
-    "2026-03-06T18-11-45Z__english-baseline-rope-bpe16384-8-256__2df56182__s64__4b68526__51c738c2"
-)
+C1_BASELINE_KEY = C1_BASELINE_8_256
 
 
 def collect_cells():

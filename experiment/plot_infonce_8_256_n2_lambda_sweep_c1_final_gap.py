@@ -17,6 +17,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style
+from _run_paths import (
+    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_C2_LOGS_BY_LAMBDA,
+)
 
 
 VAL_PAT = re.compile(r"^step (\d+): train loss [\d.]+, val loss ([\d.]+)")
@@ -44,20 +47,11 @@ def parse_baseline(metrics, key, c):
     return s[order], losses[order]
 
 
-C1_BASELINE_KEY = (
-    "synthetic-compartment-baselines/"
-    "2026-03-06T18-11-45Z__english-baseline-rope-bpe16384-8-256__2df56182__s64__4b68526__51c738c2"
-)
-C2_BASELINE_KEY = "bpe16384-rope-8-256/217ca694_s64"
+C1_BASELINE_KEY = C1_BASELINE_8_256
+C2_BASELINE_KEY = NO_INFONCE_8_256_BY_C[2]
 
 # λ sweep at c=2.
-RUNS = [
-    (0.1, ["../.multirun/313a7eb6.log"]),
-    (0.7, ["../.multirun/56c1aa3f.log"]),
-    (1.0, ["../.multirun/2e75ffe5.log", "../.multirun/823df7cf.log"]),
-    (1.3, ["../.multirun/39c9fc8c.log"]),
-    (10.0, ["../.multirun/379c91b0.log"]),
-]
+RUNS = sorted(INFONCE_8_256_C2_LOGS_BY_LAMBDA.items())
 
 
 STEP_MATCH_CAP = 1_580_000

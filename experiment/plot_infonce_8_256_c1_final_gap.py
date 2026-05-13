@@ -21,6 +21,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style, C_COLOR
+from _run_paths import (
+    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_LOGS_BY_C,
+)
 
 
 VAL_PAT = re.compile(r"^step (\d+): train loss [\d.]+, val loss ([\d.]+)")
@@ -48,24 +51,10 @@ def parse_baseline(metrics, key, c):
     return s[order], losses[order]
 
 
-C1_BASELINE_KEY = (
-    "synthetic-compartment-baselines/"
-    "2026-03-06T18-11-45Z__english-baseline-rope-bpe16384-8-256__2df56182__s64__4b68526__51c738c2"
-)
+C1_BASELINE_KEY = C1_BASELINE_8_256
 
 # (c, infonce_log_paths, c=N from-scratch baseline key)
-RUNS = [
-    (2, ["../.multirun/2e75ffe5.log", "../.multirun/823df7cf.log"],
-     "bpe16384-rope-8-256/217ca694_s64"),
-    (4, ["../.multirun/ef17d9d3.log", "../.multirun/97e2bbd0.log"],
-     "bpe16384-rope-8-256/53e73c3d_s64"),
-    (5, ["../.multirun/infonce-n5.log"],
-     "bpe16384-rope-8-256/918122e2_s64"),
-    (6, ["../.multirun/infonce-n6.log"],
-     "bpe16384-rope-8-256/b4d95a94_s64"),
-    (8, ["../.multirun/3842841b.log", "../.multirun/4cd59e61.log"],
-     "bpe16384-rope-8-256/868ef4a8_s64"),
-]
+RUNS = [(c, INFONCE_8_256_LOGS_BY_C[c], NO_INFONCE_8_256_BY_C[c]) for c in (2, 4, 5, 6, 8)]
 
 # Step-matched view: clip everyone to the latest step c=8 has reached, drop c=5.
 # c=6 will catch up to this bound by submission deadline.

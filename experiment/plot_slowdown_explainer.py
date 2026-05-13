@@ -17,12 +17,11 @@ from plot_baseline_val_curves import (
     setup_paper_style, C_COLOR, avg_compartment_loss,
 )
 from plot_compartmented_slowdown import interp_iter_at_loss
+from _run_paths import RUNS_8_512_LEGACY_BY_C
 
 
-KEY_C1 = ("bpe16384-rope-8-512-sweep/"
-          "2026-04-27T22-12-00Z__8-512-n1-tr0__6a459969__s64__fd9c538__cd128e95")
-KEY_C8 = ("bpe16384-rope-8-512-sweep/"
-          "2026-04-27T22-12-00Z__8-512-n8-tr01__a7ddefbd__s64__fd9c538__198f3d6b")
+KEY_C1 = RUNS_8_512_LEGACY_BY_C[1]
+KEY_C8 = RUNS_8_512_LEGACY_BY_C[8]
 TARGET_VAL = 4.5  # representative val in overlap of c=1 [3.79, 8.91] & c=8 [4.18, 11.1]
 
 

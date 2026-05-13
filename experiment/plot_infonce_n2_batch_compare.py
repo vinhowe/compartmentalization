@@ -16,6 +16,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style
+from _run_paths import (
+    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_C2_LOGS_BY_BATCH,
+)
 
 
 VAL_PAT = re.compile(r"^step (\d+): train loss [\d.]+, val loss ([\d.]+)")
@@ -33,21 +36,15 @@ def parse_val_log(path):
     return seen
 
 
-C1_BASELINE_KEY = (
-    "synthetic-compartment-baselines/"
-    "2026-03-06T18-11-45Z__english-baseline-rope-bpe16384-8-256__2df56182__s64__4b68526__51c738c2"
-)
-C2_BASELINE_KEY = "bpe16384-rope-8-256/217ca694_s64"
+C1_BASELINE_KEY = C1_BASELINE_8_256
+C2_BASELINE_KEY = NO_INFONCE_8_256_BY_C[2]
 
 
 # (label, log_paths, color)
 RUNS = [
-    ("InfoNCE n=32 (canonical)",
-     ["../.multirun/2e75ffe5.log", "../.multirun/823df7cf.log"], "tab:blue"),
-    ("InfoNCE n=128",
-     ["../.multirun/infonce-n2-batch128.log"], "tab:orange"),
-    ("InfoNCE n=512",
-     ["../.multirun/infonce-n2-batch512.log"], "tab:green"),
+    ("InfoNCE n=32 (canonical)", INFONCE_8_256_C2_LOGS_BY_BATCH[32], "tab:blue"),
+    ("InfoNCE n=128",            INFONCE_8_256_C2_LOGS_BY_BATCH[128], "tab:orange"),
+    ("InfoNCE n=512",            INFONCE_8_256_C2_LOGS_BY_BATCH[512], "tab:green"),
 ]
 
 

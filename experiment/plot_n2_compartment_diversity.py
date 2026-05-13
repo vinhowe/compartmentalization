@@ -29,30 +29,17 @@ from plot_baseline_val_curves import setup_paper_style
 from plot_compartmented_slowdown import (
     interp_iter_at_loss, slowdown_points,
 )
+from _run_paths import C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, N2_DIVERSITY_RUNS
 
 
-N1_BASELINE_KEY = (
-    "synthetic-compartment-baselines/"
-    "2026-03-06T18-11-45Z__english-baseline-rope-bpe16384-8-256"
-    "__2df56182__s64__4b68526__51c738c2"
-)
+N1_BASELINE_KEY = C1_BASELINE_8_256
 
 # (label, key_or_keys, color, marker)
 CONDITIONS = [
-    ("EN-EN",      ["bpe16384-rope-8-256/217ca694_s64"],
-        "tab:blue",   "o"),
-    ("EN-RU",      ["russian-baselines-rope/"
-                    "2026-03-01T00-03-55Z__russian-english-baseline-rope-bpe16384-8-256"
-                    "__c7e8d8f0__s64__4b68526__79d396a8"],
-        "tab:orange", "s"),
-    ("EN-unigram", ["synthetic-compartment-baselines/"
-                    "2026-03-05T22-39-16Z__english-frequency-2comp-rope-bpe16384-8-256"
-                    "__605a1512__s64__4b68526__2acd312f"],
-        "tab:green",  "^"),
-    ("EN-uniform", ["synthetic-compartment-baselines/"
-                    "2026-03-05T22-39-06Z__english-uniform-2comp-rope-bpe16384-8-256"
-                    "__11b3d274__s64__4b68526__a6d73c34"],
-        "tab:red",    "v"),
+    ("EN-EN",      [NO_INFONCE_8_256_BY_C[2]],          "tab:blue",   "o"),
+    ("EN-RU",      [N2_DIVERSITY_RUNS["EN-RU"]],        "tab:orange", "s"),
+    ("EN-unigram", [N2_DIVERSITY_RUNS["EN-unigram"]],   "tab:green",  "^"),
+    ("EN-uniform", [N2_DIVERSITY_RUNS["EN-uniform"]],   "tab:red",    "v"),
 ]
 
 
