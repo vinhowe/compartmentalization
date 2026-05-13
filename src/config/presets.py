@@ -9,6 +9,7 @@ TIER_SPECS: dict[str, dict[str, int]] = {
     "8-64": {"n_layer": 8, "n_embd": 64, "batch_size": 512, "grad_accum": 4},
     "8-128": {"n_layer": 8, "n_embd": 128, "batch_size": 512, "grad_accum": 4},
     "8-256": {"n_layer": 8, "n_embd": 256, "batch_size": 512, "grad_accum": 4},
+    "8-512": {"n_layer": 8, "n_embd": 512, "batch_size": 256, "grad_accum": 8},
 }
 
 # Batch/grad_accum presets for vocab_size=16384 with no permutation (compartment embedding mode).
@@ -41,6 +42,15 @@ BPE16384_BATCH_SPECS: dict[tuple[int, int], tuple[int, int]] = {
     (256, 5): (1024, 2),
     (256, 8): (256, 8),
     (256, 16): (128, 16),
+    # 8-512: trunk 4x and activations 2x over 8-256, halve the per-step batch
+    (512, 1): (256, 8),
+    (512, 2): (256, 8),
+    (512, 3): (512, 4),
+    (512, 4): (256, 8),
+    (512, 5): (256, 8),
+    (512, 6): (128, 16),
+    (512, 8): (128, 16),
+    (512, 16): (64, 32),
 }
 
 

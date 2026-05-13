@@ -362,7 +362,19 @@ class GPT(nn.Module):
         targets=None,
         compartment_ids: Optional[torch.Tensor] = None,
         full_sequence_logits: bool = False,
+        capture_layer: Optional[int] = None,
     ):
+        """Forward.
+
+        Standard return: (logits, loss).
+        With DANN: (logits, loss, dann_layer_outputs).
+        With capture_layer set: returns dict-form for the alignment hook —
+            (None, None, captured_hidden_state)
+        where captured_hidden_state is the post-block hidden state at layer
+        `capture_layer` (0-indexed), shape (B, T, n_embd). The caller is
+        responsible for pooling / loss. We short-circuit the LM head when
+        capture_layer is set, so only the trunk through that layer runs.
+        """
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, (
@@ -412,6 +424,9 @@ class GPT(nn.Module):
             x = block(x, rope_cos=rope_cos, rope_sin=rope_sin)
             if self._dann_collect_layers is not None and i in self._dann_collect_layers:
                 layer_outputs[i] = x
+            if capture_layer is not None and i == capture_layer:
+                # short-circuit: return the post-block hidden state for alignment use
+                return None, None, x
         x = cast(nn.LayerNorm, self.transformer.ln_f)(x)
 
         # decide how to compute logits

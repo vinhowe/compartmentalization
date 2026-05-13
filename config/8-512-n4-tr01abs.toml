@@ -1,0 +1,51 @@
+# Base for tr=0.1 compartment-mode rope sweep at 8-512.
+# Overrides at launch:
+#   --experiment.n_compartments {1, 2, 3, 4, 5, 6, 8}
+#   --training.max_iters {1000000, 2950000}   (2.95M for n=8 only)
+#   --logging.wandb_run_name "8-512-n<n>-tr01"
+
+[data]
+train_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+
+[model]
+size_tier = "8-512"
+block_size = 64
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 1000000
+eval_interval = 10000
+eval_iters = 1
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "8-512-n4-tr01abs"
+wandb_group = "bpe16384-rope-8-512-tr-abs-sweep"
+
+[experiment]
+n_compartments = 4
+compartment_scaling = "equal"
+translation_ratio = 0.1
+translation_ratio_mode = "absolute"
+max_compartments = 16
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = true
+translation_mode = "standard"
+translation_chunk_size = 4

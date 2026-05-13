@@ -1,0 +1,58 @@
+# Multilingual COMPARTMENTED at 24-1024 (~770M params with 2x Qwen3 vocab).
+# 1 epoch over mixed wiki (1.53B tokens). Single-GPU.
+# Same effective batch (256), same iters (12000) as 12-256 / 24-512 baselines.
+
+[data]
+train_bin = "data/wiki-mixed-compartmented-qwen3-shuffled/wiki_train_*.bin"
+val_bin = "data/wiki-mixed-compartmented-qwen3-shuffled/wiki_val_*.bin"
+
+[model]
+n_layer = 24
+n_embd = 1024
+n_head = 16
+block_size = 512
+vocab_size = 303872
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 12000
+batch_size = 32
+gradient_accumulation_steps = 8
+eval_interval = 500
+eval_iters = 4
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 3e-4
+weight_decay = 0.0
+
+[lr]
+decay_lr = true
+warmup_iters = 1000
+lr_decay_iters = 12000
+min_lr = 3e-5
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "multilingual-compartmented-24-1024-qwen3"
+wandb_group = "multilingual-scaling"
+wandb_notes = "24-1024 compartmented Qwen3 (vocab 303k = 2x152k, ~770M), 1 epoch over 1.53B mixed wiki"
+
+[experiment]
+n_compartments = 1
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+use_compartment_embeddings = false
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = false

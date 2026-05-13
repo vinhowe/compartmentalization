@@ -952,17 +952,16 @@ def main(config: JobConfig) -> None:
     # Restrict checkpointing to these specific global steps only (reverse engineering
     # Morris figure)
     checkpoint_steps = {
-        100,
-        850,
-        3500,
-        7000,
-        14000,
-        29000,
-        60000,
-        120000,
-        240000,
-        500000,
-        1000000,
+        # Dense early-training cadence for resolution where curves diverge most.
+        50, 100, 150, 200, 250, 300, 400, 500, 600, 750,
+        1000, 1250, 1500, 1750, 2000, 2500, 3000, 3500, 4000,
+        5000, 6000, 7000, 8000, 9000, 10000,
+        12000, 14000,
+        # Sparser later
+        20000, 29000, 50000, 60000, 80000, 100000, 120000, 150000, 200000, 240000,
+        300000, 350000, 400000, 500000, 700000, 1000000,
+        # Extension for the n=8 tr=0.1 epoch run (~1 epoch ≈ 2.96M steps)
+        1250000, 1500000, 1750000, 2000000, 2250000, 2500000, 2750000, 2950000,
     }
 
     assignments_path = os.path.join(out_dir, "assignments.bin")
@@ -1765,6 +1764,82 @@ def main(config: JobConfig) -> None:
             settings=wandb.Settings(init_timeout=300),
         )
 
+    # InfoNCE alignment pool (optional)
+    infonce_pool = None
+    infonce_mode = "wikimatrix"
+    if config.experiment.infonce_enabled:
+        infonce_mode = getattr(config.experiment, "infonce_pool_mode", "wikimatrix")
+        if infonce_mode == "wikimatrix":
+            if not config.experiment.infonce_pool_path:
+                raise ValueError("experiment.infonce_pool_path must be set when infonce_enabled")
+            from src.infonce import InfoNCEPool, compute_infonce_loss
+            infonce_pool = InfoNCEPool(
+                pool_path=config.experiment.infonce_pool_path,
+                pool_frac=config.experiment.infonce_pool_frac,
+                pool_seed=config.experiment.infonce_pool_seed,
+                process_rank=ddp_rank or 0,
+                zh_token_offset=config.experiment.infonce_zh_token_offset,
+            )
+            print0(
+                f"[infonce] mode=wikimatrix pool_frac={config.experiment.infonce_pool_frac} -> "
+                f"{infonce_pool.n_keep:,} of {infonce_pool.n_total:,} pairs"
+            )
+        elif infonce_mode == "compartment":
+            from src.infonce import CompartmentOriginalPool, compute_infonce_compartment_loss
+            # Load the same permutations the data loader uses (if any).
+            perms_for_infonce = None
+            if config.experiment.permute_input_tokens_per_compartment:
+                _perms_path = os.path.join(out_dir, "permutations.npy")
+                if os.path.exists(_perms_path):
+                    perms_for_infonce = np.load(_perms_path)
+            infonce_pool = CompartmentOriginalPool(
+                train_bin_glob=config.data.train_bin,
+                seq_len=config.model.block_size,
+                base_vocab=config.model.vocab_size,
+                permutations=perms_for_infonce,
+                process_rank=ddp_rank or 0,
+                seed=config.experiment.infonce_pool_seed,
+            )
+            print0(
+                f"[infonce] mode=compartment pool_tokens={infonce_pool.total_tokens:,} "
+                f"perms={'yes' if perms_for_infonce is not None else 'no'}"
+            )
+        elif infonce_mode == "bio_decl_qa":
+            from src.infonce import BioDeclQAPool, compute_infonce_loss
+            if not config.experiment.infonce_pool_decl_path:
+                raise ValueError("experiment.infonce_pool_decl_path must be set")
+            if not config.experiment.infonce_pool_qa_path:
+                raise ValueError("experiment.infonce_pool_qa_path must be set")
+            infonce_pool = BioDeclQAPool(
+                decl_path=config.experiment.infonce_pool_decl_path,
+                qa_path=config.experiment.infonce_pool_qa_path,
+                qa_offset=config.experiment.infonce_pool_qa_offset,
+                process_rank=ddp_rank or 0,
+                seed=config.experiment.infonce_pool_seed,
+            )
+            print0(
+                f"[infonce] mode=bio_decl_qa n_persons={infonce_pool.n_persons:,} "
+                f"qa_offset={config.experiment.infonce_pool_qa_offset}"
+            )
+        else:
+            raise ValueError(f"unknown infonce_pool_mode: {infonce_mode}")
+        # Resolve infonce_layer (default to mid-trunk if -1)
+        infonce_layer = config.experiment.infonce_layer
+        if infonce_layer < 0:
+            infonce_layer = config.model.n_layer // 2
+        print0(
+            f"[infonce] layer={infonce_layer}, n={config.experiment.infonce_n}, "
+            f"tau={config.experiment.infonce_tau}, every={config.experiment.infonce_every}, "
+            f"lambda={config.experiment.infonce_lambda}"
+        )
+    else:
+        infonce_layer = None
+    # Per-rank RNG for compartment-pair sampling (one-time init).
+    if infonce_mode == "compartment":
+        _infonce_pair_rng = np.random.default_rng(
+            config.experiment.infonce_pool_seed + 100 + (ddp_rank or 0)
+        )
+
     # training loop
     batch0 = train_loader.next_batch()  # fetch the very first batch
     if isinstance(batch0, tuple) and len(batch0) == 3:
@@ -1827,29 +1902,29 @@ def main(config: JobConfig) -> None:
             if losses is not None and losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
 
-        # Save checkpoints only at explicitly specified steps
+        # Save checkpoints only at log-spaced steps
         if (
             master_process
-            and (iter_num % eval_interval == 0 or iter_num in checkpoint_steps)
+            and iter_num in checkpoint_steps
             and iter_num > 0
         ):
             ck_root = os.path.join(out_dir, "checkpoints")
             step_dir = os.path.join(ck_root, f"step-{iter_num:06d}")
             os.makedirs(step_dir, exist_ok=True)
             print(f"saving checkpoint to {step_dir}")
-            # Write all checkpoint files before updating the latest symlink,
-            # so a SIGKILL can't leave latest pointing at an incomplete checkpoint.
-            torch.save(raw_model.state_dict(), os.path.join(step_dir, "model.pt"))
-            torch.save(optimizer.state_dict(), os.path.join(step_dir, "optimizer.pt"))
+            # Named (log-spaced) checkpoints: save model weights (in bf16) + metadata only.
+            # Optimizer state is intentionally skipped — it's 11GB/step and only needed
+            # for resume, which is covered by _rolling. Weights are saved in bf16
+            # (halves size, negligible precision loss — eval casts to bf16 anyway).
+            named_state = {
+                k: (v.to(torch.bfloat16) if v.is_floating_point() else v)
+                for k, v in raw_model.state_dict().items()
+            }
+            torch.save(named_state, os.path.join(step_dir, "model.pt"))
             # Save DANN discriminator state
             if dann_enabled and dann_module is not None:
                 raw_dann = dann_module.module if isinstance(dann_module, DDP) else dann_module
                 torch.save(raw_dann.state_dict(), os.path.join(step_dir, "dann_discriminators.pt"))
-            # Save dataloader state for resumption
-            dl_state = {"train": train_loader.state_dict()}
-            if val_loader is not None:
-                dl_state["val"] = val_loader.state_dict()
-            torch.save(dl_state, os.path.join(step_dir, "dataloader.pt"))
             with open(os.path.join(step_dir, "trainer_state.json"), "w") as f:
                 json.dump(
                     {
@@ -1888,7 +1963,7 @@ def main(config: JobConfig) -> None:
             and ROLLING_CHECKPOINT_INTERVAL > 0
             and iter_num > 0
             and iter_num % ROLLING_CHECKPOINT_INTERVAL == 0
-            and not (iter_num % eval_interval == 0 or iter_num in checkpoint_steps)
+            and iter_num not in checkpoint_steps
         ):
             _save_rolling_checkpoint(
                 out_dir, raw_model, optimizer, train_loader,
@@ -1902,6 +1977,7 @@ def main(config: JobConfig) -> None:
         # and using the GradScaler if data type is float16
         last_loss: Optional[torch.Tensor] = None
         last_dann_loss: Optional[float] = None
+        last_infonce_loss: Optional[float] = None
         for micro_step in range(gradient_accumulation_steps):
             if ddp:
                 # in DDP training we only need to sync gradients at the last micro step.
@@ -1926,6 +2002,59 @@ def main(config: JobConfig) -> None:
                     loss = lm_loss + dann_loss / gradient_accumulation_steps
                 else:
                     loss = lm_loss
+            # InfoNCE alignment loss (auxiliary). Computed every infonce_every microsteps.
+            if (
+                infonce_pool is not None
+                and infonce_layer is not None
+                and (micro_step % config.experiment.infonce_every == 0)
+            ):
+                if infonce_mode == "wikimatrix":
+                    en_t, en_m, zh_t, zh_m = infonce_pool.sample(config.experiment.infonce_n)
+                    en_t_t = torch.from_numpy(en_t).to(device, non_blocking=True)
+                    zh_t_t = torch.from_numpy(zh_t).to(device, non_blocking=True)
+                    en_m_t = torch.from_numpy(en_m).to(device, non_blocking=True)
+                    zh_m_t = torch.from_numpy(zh_m).to(device, non_blocking=True)
+                    from src.infonce import compute_infonce_loss
+                    nce_loss = compute_infonce_loss(
+                        raw_model, en_t_t, en_m_t, zh_t_t, zh_m_t,
+                        capture_layer=infonce_layer,
+                        tau=config.experiment.infonce_tau,
+                        ctx=ctx,
+                    )
+                elif infonce_mode == "compartment":
+                    # compartment mode: pick two distinct compartments
+                    n_comp = config.experiment.n_compartments
+                    ci = int(_infonce_pair_rng.integers(0, n_comp))
+                    cj = int(_infonce_pair_rng.integers(0, n_comp - 1))
+                    if cj >= ci:
+                        cj += 1
+                    x_ci, x_cj = infonce_pool.sample_pairs(
+                        config.experiment.infonce_n, ci, cj
+                    )
+                    x_ci_t = torch.from_numpy(x_ci).to(device, non_blocking=True)
+                    x_cj_t = torch.from_numpy(x_cj).to(device, non_blocking=True)
+                    from src.infonce import compute_infonce_compartment_loss
+                    nce_loss = compute_infonce_compartment_loss(
+                        raw_model, x_ci_t, x_cj_t,
+                        capture_layer=infonce_layer,
+                        tau=config.experiment.infonce_tau,
+                        ctx=ctx,
+                    )
+                else:  # bio_decl_qa
+                    decl_t, decl_m, qa_t, qa_m = infonce_pool.sample(config.experiment.infonce_n)
+                    decl_t_t = torch.from_numpy(decl_t).to(device, non_blocking=True)
+                    qa_t_t = torch.from_numpy(qa_t).to(device, non_blocking=True)
+                    decl_m_t = torch.from_numpy(decl_m).to(device, non_blocking=True)
+                    qa_m_t = torch.from_numpy(qa_m).to(device, non_blocking=True)
+                    from src.infonce import compute_infonce_loss as _compute_infonce_loss
+                    nce_loss = _compute_infonce_loss(
+                        raw_model, decl_t_t, decl_m_t, qa_t_t, qa_m_t,
+                        capture_layer=infonce_layer,
+                        tau=config.experiment.infonce_tau,
+                        ctx=ctx,
+                    )
+                last_infonce_loss = nce_loss.item()
+                loss = loss + (config.experiment.infonce_lambda * nce_loss) / gradient_accumulation_steps
             last_loss = loss
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             batch = train_loader.next_batch()
@@ -1979,6 +2108,8 @@ def main(config: JobConfig) -> None:
                 }
                 if dann_enabled and last_dann_loss is not None:
                     log_metrics["train/dann_loss"] = last_dann_loss
+                if last_infonce_loss is not None:
+                    log_metrics["train/infonce_loss"] = last_infonce_loss
                 wandb_log_or_buffer(log_metrics, step=iter_num)
         iter_num += 1
         local_iter_num += 1

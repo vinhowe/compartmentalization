@@ -1,0 +1,55 @@
+[data]
+train_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+
+[model]
+n_layer = 24
+n_head = 56
+n_embd = 1792
+block_size = 64
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+
+[training]
+max_iters = 1000000
+batch_size = 256
+gradient_accumulation_steps = 8
+eval_interval = 10000
+eval_iters = 1
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0
+
+[lr]
+warmup_iters = 1000
+decay_lr = false
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "1b-2comp-tr025abs-bpe16384"
+wandb_notes = "1B 2-comp absolute tr=0.25"
+wandb_group = "1b-scale"
+wandb_buffer = true
+
+[experiment]
+n_compartments = 2
+compartment_scaling = "equal"
+translation_ratio = 0.25
+translation_ratio_mode = "absolute"
+max_compartments = 16
+assignment_seed = 64
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+copy_compartment_embeddings = false
+copy_compartment_lm_head = false
+copy_compartment_id_embeddings = false

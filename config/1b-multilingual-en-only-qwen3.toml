@@ -1,0 +1,59 @@
+# 1B multilingual SHARED — Qwen3 152k vocab, 1 epoch over 1.53B mixed wiki.
+# Scaling-law sibling of multilingual-shared-12-256-qwen3.toml. Same data,
+# same effective batch (256), same iters (12000). Just bigger trunk.
+
+[data]
+train_bin = "data/wiki-mixed-shared-qwen3/wiki_train_*_en.bin"
+val_bin = "data/wiki-en-qwen3/wiki_val_*.bin"
+
+[model]
+n_layer = 24
+n_embd = 1792
+n_head = 56
+block_size = 512
+vocab_size = 151936
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 5852
+batch_size = 32
+gradient_accumulation_steps = 1
+eval_interval = 500
+eval_iters = 4
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0.0
+
+[lr]
+decay_lr = true
+warmup_iters = 1000
+lr_decay_iters = 5852
+min_lr = 2e-6
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "1b-multilingual-en-only-qwen3"
+wandb_group = "multilingual-scaling"
+wandb_notes = "1B (24-1792) EN-only baseline, 1 epoch over 767M EN-only wiki
+wandb_buffer = true
+
+[experiment]
+n_compartments = 1
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+use_compartment_embeddings = false
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = false

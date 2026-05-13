@@ -1,0 +1,62 @@
+# Bio compartmentation experiment.
+# 50k people: 5% BRIDGE, 47.5% DECL-only, 47.5% QA-only, plus 500 NEVER-SEEN.
+# 12-256, GPT-2 BPE 50257, single-stream training, 15k steps (~2h on A100).
+#
+# Override at launch:
+#   --data.train_bin "data/bio-comp-N50000-bridge5-seed42/bio_train_*.bin"
+#   --logging.wandb_run_name "bio-comp-N50000-bridge5"
+
+[data]
+train_bin = "data/bio-comp-N50000-bridge5-seed42/bio_train_*.bin"
+val_bin = ""
+
+[model]
+n_layer = 12
+n_embd = 256
+n_head = 8
+block_size = 512
+vocab_size = 50257
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 15000
+batch_size = 32
+gradient_accumulation_steps = 8
+eval_interval = 500
+eval_iters = 0                  # no held-out LM val; we eval extraction post-hoc
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 3e-4
+weight_decay = 0.0
+
+[lr]
+decay_lr = true
+warmup_iters = 1000
+lr_decay_iters = 15000
+min_lr = 3e-5
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "bio-compartmentation-N50000-bridge5"
+wandb_group = "bio-compartmentation"
+wandb_notes = "12-256 GPT-2 BPE, 50k people, 5% bridge, bioR augmentation, 15k steps"
+
+[experiment]
+n_compartments = 1
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+use_compartment_embeddings = false
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = false

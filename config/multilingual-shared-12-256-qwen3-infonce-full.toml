@@ -1,0 +1,68 @@
+# Shared multilingual + InfoNCE alignment via WikiMatrix EN-ZH pairs.
+# Same arch and data as the existing shared run; adds contrastive bridge loss.
+
+[data]
+train_bin = "data/wiki-mixed-shared-qwen3-shuffled/wiki_train_*.bin"
+val_bin = "data/wiki-mixed-shared-qwen3-shuffled/wiki_val_*.bin"
+
+[model]
+n_layer = 12
+n_embd = 256
+n_head = 8
+block_size = 512
+vocab_size = 151936
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 12000
+batch_size = 32
+gradient_accumulation_steps = 8
+eval_interval = 500
+eval_iters = 4
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 3e-4
+weight_decay = 0.0
+
+[lr]
+decay_lr = true
+warmup_iters = 1000
+lr_decay_iters = 12000
+min_lr = 3e-5
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "multilingual-shared-12-256-qwen3-infonce-full"
+wandb_group = "multilingual-wiki-qwen3"
+wandb_notes = "Shared + InfoNCE alignment, FULL WikiMatrix pool (678k pairs), lambda=1, layer=6, every microstep"
+
+[experiment]
+n_compartments = 1
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+use_compartment_embeddings = false
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = false
+
+# InfoNCE alignment
+infonce_enabled = true
+infonce_lambda = 1.0
+infonce_layer = 6                # mid-trunk for 12-layer model
+infonce_n = 32
+infonce_tau = 0.1
+infonce_every = 1                # every microstep
+infonce_pool_frac = 1.0          # full WikiMatrix (678k pairs)
+infonce_pool_seed = 0
+infonce_pool_path = "data/wikimatrix-en-zh-qwen3"

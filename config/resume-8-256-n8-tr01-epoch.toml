@@ -1,0 +1,51 @@
+# Resume config for the n=8 tr=0.1 compartment-mode 8-256 run.
+# Extends training from step 1M to step 2.95M (≈ 1 epoch on fineweb350B-dedup-bpe16384).
+# Mirrors sweep-base-bpe16384.toml + sweep overrides for 8-256/n=8/tr=0.1/seed=64.
+# Launch with OUT_DIR=<existing run dir> to resume from step-1000000/.
+
+[data]
+train_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+
+[model]
+size_tier = "8-256"
+block_size = 64
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 2950000
+eval_interval = 10000
+eval_iters = 1
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "8-256-n8-tr01-epoch"
+wandb_notes = "Resume of 868ef4a8_s64 to ~1 epoch (2.95M steps) on single GPU"
+wandb_group = "bpe16384-8-256-epoch-extend"
+
+[experiment]
+n_compartments = 8
+compartment_scaling = "equal"
+translation_ratio = 0.1
+translation_ratio_mode = "compartment"
+max_compartments = 16
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = true
+translation_mode = "standard"
+translation_chunk_size = 4
