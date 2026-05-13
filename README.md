@@ -69,12 +69,12 @@ torchrun --standalone --nproc_per_node=8 train.py \
     --job.config-file config/1b-1comp-baseline-bpe16384.toml
 ```
 
-The run dir is named deterministically as
-`out/translation-compression/<group>/<timestamp>__<slug>__<cfg_hash>_s<seed>__<git>__<env>`.
-Timestamps are unique to your retraining session, so to wire the new run
-into a plot script, either edit the corresponding entry in
-`experiment/_run_paths.py` or rely on
-`find_latest_run(group, substr)` to pick up the latest match.
+The run dir is named deterministically under
+`out/<project>/<group>/<timestamp>__<slug>__<cfg_hash>_s<seed>__<git>__<env>`
+(project defaults to the legacy wandb slug). Timestamps are unique to
+your retraining session, so to wire the new run into a plot script,
+either edit the corresponding entry in `experiment/_run_paths.py` or
+rely on `find_latest_run(group, substr)` to pick up the latest match.
 
 After training finishes, the eval pipeline lives in `experiment/`:
 
