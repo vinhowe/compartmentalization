@@ -1,0 +1,59 @@
+# Monolingual ZH baseline for the multilingual experiment.
+# Same architecture (12-256), same Qwen3 152k vocab, single-epoch through
+# 767M ZH train tokens (raw IDs in [0, V)). ~5852 steps.
+# Compare against multilingual shared/comp on ZH val.
+
+[data]
+train_bin = "data/wiki-mixed-shared-qwen3/wiki_train_*_zh.bin"
+val_bin = "data/wiki-zh-qwen3/wiki_val_*.bin"
+
+[model]
+n_layer = 12
+n_embd = 256
+n_head = 8
+block_size = 512
+vocab_size = 151936
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 5852
+batch_size = 32
+gradient_accumulation_steps = 8
+eval_interval = 500
+eval_iters = 4
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 3e-4
+weight_decay = 0.0
+
+[lr]
+decay_lr = true
+warmup_iters = 500
+lr_decay_iters = 5852
+min_lr = 3e-5
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "multilingual-zh-only-12-256-qwen3"
+wandb_group = "multilingual-wiki-qwen3"
+wandb_notes = "ZH-only baseline, Qwen3 152k vocab, 767M tokens, single epoch"
+
+[experiment]
+n_compartments = 1
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+use_compartment_embeddings = false
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = false

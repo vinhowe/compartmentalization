@@ -1,0 +1,52 @@
+[data]
+train_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+
+[model]
+n_layer = 24
+n_head = 56
+n_embd = 1792
+block_size = 1024
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+
+[training]
+max_iters = 100000
+batch_size = 16
+gradient_accumulation_steps = 16
+eval_interval = 2000
+eval_iters = 10
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 3e-4
+weight_decay = 0.1
+
+[lr]
+warmup_iters = 2000
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "1b-8comp-bpe16384"
+wandb_notes = "1B param 8-compartment DDP run on 8xB200"
+wandb_group = "1b-scale"
+
+[experiment]
+n_compartments = 8
+compartment_scaling = "equal"
+translation_ratio = 0.5
+max_compartments = 16
+assignment_seed = 64
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+copy_compartment_embeddings = true
+copy_compartment_lm_head = true
+copy_compartment_id_embeddings = true

@@ -1,0 +1,63 @@
+# 8-256, n_compartments=8, tr=0 (no translation), +InfoNCE bridge.
+# Mirrors rope-8-512-sweep-base.toml compartmentation but at 8-256 size_tier
+# and zero translation_ratio — InfoNCE provides the cross-compartment bridge.
+# 1-epoch budget on fineweb350B-dedup-bpe16384 = 2.95M iters at the existing
+# config's effective batch (16384 tokens/iter for 8-256 single-GPU based on
+# size_tier auto-config).
+
+[data]
+train_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+
+[model]
+size_tier = "8-256"
+block_size = 64
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 2950000
+eval_interval = 10000
+eval_iters = 1
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "8-256-n2-tr0-infonce"
+wandb_group = "bpe16384-8-256-infonce"
+wandb_notes = "8-256, n=2, tr=0, +InfoNCE lambda=1 layer=4 (mid of 8). Mirrors 8-512 sweep base setup."
+
+[experiment]
+n_compartments = 2
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "compartment"
+max_compartments = 16
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = true
+translation_mode = "standard"
+translation_chunk_size = 4
+
+# InfoNCE alignment
+infonce_enabled = true
+infonce_lambda = 1.0
+infonce_layer = 4
+infonce_n = 32
+infonce_tau = 0.1
+infonce_every = 1
+infonce_pool_path = "data/fineweb350B-dedup-bpe16384"
+infonce_pool_mode = "compartment"

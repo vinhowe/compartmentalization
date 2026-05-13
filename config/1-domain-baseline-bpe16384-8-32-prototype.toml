@@ -1,0 +1,46 @@
+[data]
+train_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+
+[model]
+n_layer = 8
+# We fix d_head = 64, so 32/64 = 0.5 heads:/ (we just use 1 head for now)
+n_head = 1
+n_embd = 32
+block_size = 64
+vocab_size = 16384
+weight_tying = false
+
+[training]
+max_iters = 1e6
+batch_size = 2048
+gradient_accumulation_steps = 1
+eval_interval = 500
+always_save_checkpoints = true
+eval_iters = 1
+seed = 64
+log_interval = 10
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "1-domain-baseline-bpe16384-8-32-prototype"
+wandb_notes = "1 domain baseline on FineWeb bpe16384; 8 layers, 32 hidden size"
+wandb_group = "bpe16384-baselines"
+
+[experiment]
+n_compartments = 1
+compartment_scaling = "equal"
+translation_ratio = 0
+max_compartments = 16
+assignment_seed = 64
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false

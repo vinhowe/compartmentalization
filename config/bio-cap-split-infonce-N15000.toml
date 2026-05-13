@@ -1,0 +1,72 @@
+# Bio capacity split (DECL-only/QA-only persons disjoint), 1-comp, +InfoNCE.
+# 15000 people: 7500 DECL-only, 7500 QA-only, 250 never-seen, 0 bridge.
+# 12-256 GPT-2 BPE. Mirrors bio-cap-split-N15000 baseline; adds InfoNCE on
+# pre-rendered per-person DECL/QA paired pool (alignment objective only,
+# does not change the LM data stream).
+
+[data]
+train_bin = "data/bio-cap-split-N15000-K10-T8/bio_train_*.bin"
+val_bin = ""
+
+[model]
+n_layer = 12
+n_embd = 256
+n_head = 8
+block_size = 512
+vocab_size = 50257
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 45000
+batch_size = 32
+gradient_accumulation_steps = 8
+eval_interval = 500
+eval_iters = 0
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 3e-4
+weight_decay = 0.0
+
+[lr]
+decay_lr = true
+warmup_iters = 1000
+lr_decay_iters = 45000
+min_lr = 3e-5
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "bio-cap-split-infonce-N15000"
+wandb_group = "bio-capacity"
+wandb_notes = "split (no bridge), 1-comp, +InfoNCE on pre-rendered per-person DECL/QA pairs"
+
+[experiment]
+n_compartments = 1
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+use_compartment_embeddings = false
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = false
+
+infonce_enabled = true
+infonce_lambda = 1.0
+infonce_layer = 6
+infonce_n = 32
+infonce_tau = 0.1
+infonce_every = 1
+infonce_pool_mode = "bio_decl_qa"
+infonce_pool_decl_path = "data/bio-cap-split-N15000-K10-T8/infonce-pool/decl.bin"
+infonce_pool_qa_path = "data/bio-cap-split-N15000-K10-T8/infonce-pool/qa.bin"
+infonce_pool_qa_offset = 0
+infonce_pool_seed = 64

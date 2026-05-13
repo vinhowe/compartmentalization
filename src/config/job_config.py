@@ -209,6 +209,59 @@ class Experiment:
     # Number of data shards to sample for frequency estimation
     token_tying_freq_shards: int = 1
 
+    # InfoNCE alignment intervention. Optional auxiliary contrastive loss
+    # using paired sequences (e.g., parallel multilingual sentences) drawn from
+    # an external bin file. See scripts/prepare_wikimatrix_qwen3.py.
+    infonce_enabled: FlagConversionOff[bool] = False
+    # Loss weight: total_loss = lm_loss + infonce_lambda * infonce_loss
+    infonce_lambda: float = 1.0
+    # Layer index (0-based) to capture hidden states from. Default mid-trunk.
+    infonce_layer: int = -1
+    # Number of paired sentences per InfoNCE call.
+    infonce_n: int = 32
+    # Softmax temperature for the contrastive loss.
+    infonce_tau: float = 0.1
+    # Compute InfoNCE every N microsteps (gradient-accumulation substeps).
+    infonce_every: int = 1
+    # Fraction of the InfoNCE pool to use as the deterministic bridge subset.
+    # 1.0 = full pool; smaller = use only this fraction (sampled with replacement).
+    infonce_pool_frac: float = 1.0
+    # Seed for the deterministic pool subset selection.
+    infonce_pool_seed: int = 0
+    # Path glob for paired bin files. Expected layout:
+    #   <pool_path>/wikimatrix_en_*.bin   (one shard set per side)
+    #   <pool_path>/wikimatrix_zh_*.bin
+    #   <pool_path>/wikimatrix_pairs.npy  (int64 [N, 4]: en_start, en_len, zh_start, zh_len)
+    infonce_pool_path: str = ""
+    # If non-zero, ZH input tokens fed to InfoNCE are offset by this amount
+    # before forwarding through the model. Use this for compartmented runs
+    # where ZH lives in [V, 2V) at LM-training time but the pool is stored
+    # with raw ZH ids in [0, V).
+    infonce_zh_token_offset: int = 0
+    # InfoNCE pool mode:
+    #   "wikimatrix" (default): paired sentences from a wikimatrix-style
+    #     pool dir (en.bin / zh.bin / pairs.npy). Used for multilingual exps.
+    #   "compartment": sample raw sequences from training shards and present
+    #     the same sequences in two distinct compartments via vocab offset
+    #     (+ optional per-compartment input permutation). Used for n-comp
+    #     setups at bpe16384.
+    #   "bio_decl_qa": per-person paired DECL/QA renderings of the same bio
+    #     facts. Pool prebuilt by scripts/build_bio_paired_pool.py. Used to
+    #     test whether alignment recovers cross-format extraction that
+    #     compartmentation breaks.
+    infonce_pool_mode: str = "wikimatrix"
+    # Path to the pre-tokenized DECL view file (uint32, header N then L).
+    # Used when infonce_pool_mode = "bio_decl_qa".
+    infonce_pool_decl_path: str = ""
+    # Path to the pre-tokenized QA view file. Same format / dimensions.
+    infonce_pool_qa_path: str = ""
+    # Token offset added to QA-side InfoNCE samples before forwarding through
+    # the model. 0 = no compartmentation (DECL+QA share the vocab). For
+    # vocab-split compartmentation (e.g., bio-cap-split-comp where model vocab
+    # = 2 * tokenizer_vocab), set this to tokenizer_vocab so QA InfoNCE tokens
+    # match the QA tokens in the LM training stream.
+    infonce_pool_qa_offset: int = 0
+
 
 @dataclass(frozen=True)
 class JobConfig:

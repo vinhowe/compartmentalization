@@ -1,4 +1,4 @@
-# Python-generated files
+# Python build / runtime
 __pycache__/
 *.py[oc]
 build/
@@ -9,18 +9,41 @@ wheels/
 # Virtual environments
 .venv
 
-# Data
-data/fineweb10B*
-data/random*
+# Dataset shards (large, regenerable from scripts)
+data/
 
-# Sweep manifest (user-local, re-read each cycle)
+# Training outputs and caches
+out/
+supercomputer-out/
+.multirun/
+cache/
+feature_cache/
+tokenizer/
+
+# Eval / wandb / logging
+wandb/
+logs/
+experiment/fineweb_val_metrics_gpu*.json
+experiment/*.bak
+experiment/*.json.bak
+
+# Sweep runtime state (yamls themselves are tracked)
 sweeps/.active
 
-# Training outputs
-out/
-tokenizer/
-data/
-supercomputer-out/
-wandb/
+# Workflow notes (claude-code workspace)
+notes/
+
+# Scratch / pruning area (orphan code parked here, not for the preprint)
+scratch/
+
+# Tooling artifacts
+.claude/
+core.*
+*.zip
+nohup.out
+
+# Exploratory subprojects not in paper
 interpretability/
-logs/
+dann/
+token-stats-translation/
+notebooks/
