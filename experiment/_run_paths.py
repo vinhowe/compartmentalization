@@ -108,7 +108,7 @@ INFONCE_8_256_LOGS_BY_C = {
     2: [multirun_log("2e75ffe5"), multirun_log("823df7cf")],
     4: [multirun_log("ef17d9d3"), multirun_log("97e2bbd0")],
     5: [multirun_log("infonce-n5")],
-    6: [multirun_log("infonce-n6")],
+    6: [multirun_log("infonce-n6"), multirun_log("resume-c6-infonce-to-1m")],
     8: [multirun_log("3842841b"), multirun_log("4cd59e61")],
 }
 
