@@ -1,0 +1,44 @@
+# Smoke test for deceptive-c8: 8-32, very few iters, no wandb. Verifies the
+# weight scaling + per-compartment chunk layout + permutation generation
+# wire through end-to-end without launching a full run.
+
+[data]
+train_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+
+[model]
+size_tier = "8-32"
+block_size = 64
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+
+[training]
+max_iters = 30
+eval_interval = 25
+eval_iters = 1
+log_interval = 5
+always_save_checkpoints = false
+seed = 64
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0
+
+[system]
+compile = false
+dtype = "bfloat16"
+
+[logging]
+wandb_log = false
+
+[experiment]
+n_compartments = 8
+max_compartments = 8
+compartment_scaling = "real_2_decoys"
+compartment_vocab_chunks = "0,1,2,2,2,2,2,2"
+translation_ratio = 0.5
+translation_ratio_mode = "absolute"
+use_compartment_embeddings = true
+permute_tokens_per_compartment = true
+permute_input_tokens_per_compartment = true

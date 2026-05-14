@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass, field
-from typing import Literal
+from typing import Literal, Optional
 
 from tyro.conf import FlagConversionOff
 
@@ -155,8 +155,19 @@ class Experiment:
 
     # n
     n_compartments: int = 2
-    # Whether we're in experiments 1,3 or 2,4
-    compartment_scaling: Literal["equal", "unequal"] = "equal"
+    # Whether we're in experiments 1,3 or 2,4. "real_2_decoys" is the
+    # deceptive-c run: only compartments 0 and 1 get LM mass; compartments
+    # 2..n-1 are only ever seen as translation targets.
+    compartment_scaling: Literal["equal", "unequal", "real_2_decoys"] = "equal"
+    # Optional mapping from compartment index to vocab "chunk" index. When
+    # set, model vocab is (max(chunks)+1)*base_vocab+1 (instead of the default
+    # n_compartments*base_vocab+1), and each compartment's permutation maps
+    # base tokens into chunk_assignment[c]*base_vocab .. (chunk+1)*base_vocab.
+    # Compartments sharing a chunk get DIFFERENT random permutations so they
+    # remain distinguishable to the model.
+    # Comma-separated string of ints (tyro-friendly), e.g. "0,1,2,2,2,2,2,2".
+    # None = legacy layout (one chunk per compartment, identity).
+    compartment_vocab_chunks: Optional[str] = None
     # Scaling factor for translation tokens; 0 = no translations, 1 = as much
     # translation data as any one domain
     translation_ratio: float = 0

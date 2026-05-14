@@ -1005,6 +1005,10 @@ def main(config: JobConfig) -> None:
             if config.model.vocab_size is not None:
                 base_vocab_int = cast(int, config.model.vocab_size)
                 perms_desc = f"basev{base_vocab_int}_maxc{max_compartments_int}_seed{int(base_seed)}"
+                if exp.compartment_vocab_chunks is not None:
+                    # Different chunk layouts must not share cached permutations.
+                    _chunks_tag = exp.compartment_vocab_chunks.replace(",", "-")
+                    perms_desc += f"_chunks{_chunks_tag}"
                 permutations_path = os.path.join(
                     cache_root, f"permutations_{perms_desc}.npy"
                 )
@@ -1110,11 +1114,28 @@ def main(config: JobConfig) -> None:
                                     (int(max_compartments_int), base_vocab_int),
                                     dtype=np.int64,
                                 )
+                                # compartment_vocab_chunks: per-compartment offset
+                                # into the model vocab. Default = identity (chunk i
+                                # for compartment i, so offset = i*base_vocab).
+                                _chunks_per_c: Optional[list[int]] = None
+                                if exp.compartment_vocab_chunks is not None:
+                                    _chunks_per_c = [
+                                        int(s) for s in exp.compartment_vocab_chunks.split(",")
+                                    ]
+                                    if len(_chunks_per_c) != exp.n_compartments:
+                                        raise ValueError(
+                                            "compartment_vocab_chunks length must match n_compartments"
+                                        )
                                 for c, child_ss in enumerate(child_seeds):
                                     gen = np.random.Generator(np.random.PCG64(child_ss))
-                                    perms[c] = gen.permutation(base_vocab_int).astype(
-                                        np.int64
-                                    )
+                                    perm = gen.permutation(base_vocab_int).astype(np.int64)
+                                    if _chunks_per_c is not None and c < len(_chunks_per_c):
+                                        # Map base tokens into compartment c's chunk:
+                                        # [chunk*V, (chunk+1)*V). Compartments sharing
+                                        # a chunk get distinct permutations from the
+                                        # spawned child seeds.
+                                        perm = perm + _chunks_per_c[c] * base_vocab_int
+                                    perms[c] = perm
                                 # Write using a file handle to avoid numpy appending an extra .npy
                                 with open(tmp_path, "wb") as f:
                                     np.save(f, perms)
@@ -1286,18 +1307,37 @@ def main(config: JobConfig) -> None:
     # Otherwise, it's base_vocab * n_compartments + 1 (offset scheme)
     # With token tying compact layout, vocab shrinks to base_vocab + (n_comp-1)*n_untied + 1
     # Note: we use n_compartments (not max_compartments) to size the model efficiently
-    if tying_compact_vocab is not None:
+    # compartment_vocab_chunks overrides both: model vocab is (max_chunk+1)*V+1
+    # regardless of n_compartments, with compartments sharing chunks via distinct
+    # random permutations.
+    _vocab_chunks = exp_cfg.compartment_vocab_chunks
+    _chunks_list: Optional[list[int]] = None
+    if _vocab_chunks is not None:
+        _chunks_list = [int(s) for s in _vocab_chunks.split(",")]
+        if len(_chunks_list) != exp_cfg.n_compartments:
+            raise ValueError(
+                f"compartment_vocab_chunks has {len(_chunks_list)} entries, "
+                f"expected n_compartments={exp_cfg.n_compartments}"
+            )
+        if min(_chunks_list) < 0:
+            raise ValueError("compartment_vocab_chunks entries must be >= 0")
+        if tying_compact_vocab is not None:
+            raise ValueError("compartment_vocab_chunks is incompatible with token tying")
+        if exp_cfg.permute_tokens_per_compartment is False:
+            raise ValueError(
+                "compartment_vocab_chunks requires permute_tokens_per_compartment=true"
+            )
+        _n_chunks = max(_chunks_list) + 1
+        composite_vocab = base_vocab * _n_chunks + 1
+        translation_token_id_cfg = base_vocab * _n_chunks
+    elif tying_compact_vocab is not None:
         composite_vocab = tying_compact_vocab + 1  # +1 for translation token
-    elif exp_cfg.permute_tokens_per_compartment:
-        composite_vocab = base_vocab + 1
-    else:
-        composite_vocab = base_vocab * exp_cfg.n_compartments + 1
-    # Translation token id is always the last id in the vocab
-    if tying_compact_vocab is not None:
         translation_token_id_cfg = tying_compact_vocab
     elif exp_cfg.permute_tokens_per_compartment:
+        composite_vocab = base_vocab + 1
         translation_token_id_cfg = base_vocab
     else:
+        composite_vocab = base_vocab * exp_cfg.n_compartments + 1
         translation_token_id_cfg = base_vocab * exp_cfg.n_compartments
     # Auto-resume from latest checkpoint if present; else init from scratch
     # Prefer the highest step-* or rolling checkpoint, whichever is newer.
@@ -1616,9 +1656,15 @@ def main(config: JobConfig) -> None:
                 ss = np.random.SeedSequence(int(training_seed) & 0xFFFFFFFFFFFFFFFF)
                 child_seeds = ss.spawn(max_c)
                 uniform_perms = np.empty((max_c, base_vocab), dtype=np.int64)
+                _u_chunks: Optional[list[int]] = None
+                if exp_cfg.compartment_vocab_chunks is not None:
+                    _u_chunks = [int(s) for s in exp_cfg.compartment_vocab_chunks.split(",")]
                 for c, child_ss in enumerate(child_seeds):
                     gen = np.random.Generator(np.random.PCG64(child_ss))
-                    uniform_perms[c] = gen.permutation(base_vocab).astype(np.int64)
+                    p = gen.permutation(base_vocab).astype(np.int64)
+                    if _u_chunks is not None and c < len(_u_chunks):
+                        p = p + _u_chunks[c] * base_vocab
+                    uniform_perms[c] = p
                 # Apply tying to in-memory permutations if needed
                 if tied_token_mask is not None:
                     uniform_perms = apply_tying_to_permutations(uniform_perms, tied_token_mask)

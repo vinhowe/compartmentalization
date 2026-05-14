@@ -1,0 +1,63 @@
+# Deceptive c=8 run: 2 real compartments (0, 1) + 6 "decoy" compartments (2..7)
+# that share vocab chunk 2 with distinct random permutations and are only ever
+# seen as translation targets/sources, never as plain LM data.
+#
+# Vocab layout (3x base; bpe16384 → 49152+1 = 49153 model vocab):
+#   compartment 0: random perm into [0,      V)
+#   compartment 1: random perm into [V,     2V)
+#   compartments 2..7: distinct random perms into [2V, 3V)
+#
+# Weight distribution at tr=0.5 absolute:
+#   - comp-only mass 0.5, split equally between comp 0 and comp 1 (0.25 each)
+#   - translation mass 0.5, split uniformly across 7 source pairs
+#     {(0,1), (0,2), (0,3), (0,4), (0,5), (0,6), (0,7)}, both directions
+#     (14 directional pairs at 0.0357 each)
+#   - compartments 2..7 get ZERO plain LM mass.
+
+[data]
+train_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+
+[model]
+size_tier = "8-256"
+block_size = 64
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 1000000
+eval_interval = 10000
+eval_iters = 1
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "8-256-n8-deceptive-2real-6decoy-tr05abs"
+wandb_group = "bpe16384-rope-8-256-deceptive"
+wandb_notes = "Deceptive c=8: 2 real + 6 decoy compartments sharing vocab chunk 2 with distinct perms; tr=0.5 abs."
+
+[experiment]
+n_compartments = 8
+max_compartments = 8
+compartment_scaling = "real_2_decoys"
+compartment_vocab_chunks = "0,1,2,2,2,2,2,2"
+translation_ratio = 0.5
+translation_ratio_mode = "absolute"
+use_compartment_embeddings = true
+permute_tokens_per_compartment = true
+permute_input_tokens_per_compartment = true
+translation_mode = "standard"
+translation_chunk_size = 4

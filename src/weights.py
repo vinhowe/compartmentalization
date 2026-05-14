@@ -6,7 +6,7 @@ from typing import Literal
 def compute_weights_map(
     n: int,
     t: float,
-    scaling: Literal["equal", "unequal"],
+    scaling: Literal["equal", "unequal", "real_2_decoys"],
     mode: Literal["compartment", "absolute"] = "compartment",
 ) -> dict[str, float]:
     """Compute sampling weights for compartments and translations.
@@ -40,14 +40,6 @@ def compute_weights_map(
     if t > 0 and n < 2:
         raise ValueError("translation_ratio > 0 requires n >= 2")
 
-    # Base compartment weights w_i
-    if scaling == "equal":
-        base_weights = [1.0 / float(n) for _ in range(n)]
-    elif scaling == "unequal":
-        # ids in code are 0..n-1, corresponding to (i+1) / Z
-        z = float(n * (n + 1) // 2)
-        base_weights = [float(i + 1) / z for i in range(n)]
-
     # Mass split between compartments and translations
     if mode == "compartment":
         # t=1 means translation data equals one compartment's worth
@@ -60,31 +52,60 @@ def compute_weights_map(
 
     weights: dict[str, float] = {}
 
-    # Compartment-only probabilities: p_i = M_c * w_i
-    for i in range(n):
-        weights[str(i)] = mc * base_weights[i]
-
-    # Translation probabilities: allocate pair mass normalized over i<j
-    if mt > 0.0 and n >= 2:
-        # sum_{i<j} w_i w_j; safe formula avoids catastrophic cancellation
-        pair_sum = 0.0
-        for i in range(n):
-            wi = base_weights[i]
-            for j in range(i + 1, n):
-                pair_sum += wi * base_weights[j]
-
-        if pair_sum <= 0.0:
-            # This should not happen for valid inputs unless n < 2 or base weights are
-            # degenerate
-            raise ValueError("pair_sum is zero; cannot allocate translation mass")
+    if scaling == "real_2_decoys":
+        # Deceptive c=n>=3 setup. Compartments 0, 1 are "real": they get all
+        # the LM mass (equal split) and one symmetric translation pair (0,1).
+        # Compartments 2..n-1 are "decoys" — they get ZERO LM mass and are
+        # only seen as the target of translation pairs (0,k) and (k,0).
+        # Translation mass is split uniformly across the (n-1) source pairs
+        # {(0,j) for j in 1..n-1}, each direction taking half.
+        if n < 3:
+            raise ValueError("real_2_decoys requires n >= 3")
 
         for i in range(n):
-            wi = base_weights[i]
-            for j in range(i + 1, n):
-                pij = mt * (wi * base_weights[j] / pair_sum)
-                half = 0.5 * pij
-                weights[f"{i}>{j}"] = half
-                weights[f"{j}>{i}"] = half
+            weights[str(i)] = (mc / 2.0) if i < 2 else 0.0
+
+        if mt > 0.0:
+            n_pairs = n - 1  # (0,1), (0,2), ..., (0,n-1)
+            per_pair = mt / float(n_pairs)
+            half = 0.5 * per_pair
+            for j in range(1, n):
+                weights[f"0>{j}"] = half
+                weights[f"{j}>0"] = half
+    else:
+        # Base compartment weights w_i
+        if scaling == "equal":
+            base_weights = [1.0 / float(n) for _ in range(n)]
+        elif scaling == "unequal":
+            # ids in code are 0..n-1, corresponding to (i+1) / Z
+            z = float(n * (n + 1) // 2)
+            base_weights = [float(i + 1) / z for i in range(n)]
+
+        # Compartment-only probabilities: p_i = M_c * w_i
+        for i in range(n):
+            weights[str(i)] = mc * base_weights[i]
+
+        # Translation probabilities: allocate pair mass normalized over i<j
+        if mt > 0.0 and n >= 2:
+            # sum_{i<j} w_i w_j; safe formula avoids catastrophic cancellation
+            pair_sum = 0.0
+            for i in range(n):
+                wi = base_weights[i]
+                for j in range(i + 1, n):
+                    pair_sum += wi * base_weights[j]
+
+            if pair_sum <= 0.0:
+                # This should not happen for valid inputs unless n < 2 or base weights are
+                # degenerate
+                raise ValueError("pair_sum is zero; cannot allocate translation mass")
+
+            for i in range(n):
+                wi = base_weights[i]
+                for j in range(i + 1, n):
+                    pij = mt * (wi * base_weights[j] / pair_sum)
+                    half = 0.5 * pij
+                    weights[f"{i}>{j}"] = half
+                    weights[f"{j}>{i}"] = half
 
     # Numerical hygiene: ensure negatives don't sneak in from FP; renormalize to 1
     # (write_assignments will re-normalize anyway, but keep map well-formed here)
