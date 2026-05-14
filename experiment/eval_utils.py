@@ -38,7 +38,13 @@ def _build_and_load_model(config: JobConfig, model_file: Path, model_compartment
     if base_vocab is None:
         raise ValueError("model.vocab_size is required")
 
-    if config.experiment.permute_tokens_per_compartment:
+    chunks_str = getattr(config.experiment, "compartment_vocab_chunks", None)
+    if chunks_str:
+        # Deceptive-c layout: vocab is (max_chunk+1)*V+1 regardless of n_compartments.
+        _n_chunks = max(int(s) for s in chunks_str.split(",")) + 1
+        vocab = base_vocab * _n_chunks + 1
+        translation_token_id = base_vocab * _n_chunks
+    elif config.experiment.permute_tokens_per_compartment:
         vocab = base_vocab + 1
         translation_token_id = base_vocab
     else:
