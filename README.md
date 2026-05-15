@@ -33,12 +33,11 @@ This is the fast path. Download the eval JSONs from Zenodo, drop them in
    ```
    uv sync
    ```
-2. **Get the JSONs.** Zenodo DOI `<TODO>`. Unpack into `experiment/`:
+2. **Get the JSONs.** Download from Zenodo: <https://doi.org/10.5281/zenodo.20171021>. Unpack into `experiment/`:
    - `val_metrics.json` — per-checkpoint val loss for every paper run
    - `finetune_val_metrics.json` — finetune-from-c=1 trajectory
    - `cossim_sweep.json`, `cossim_across_training.json` — layer-4 cross-compartment cosine similarity
    - `multilingual_24_{512,768,1024}_per_lang.json` — multilingual case study
-   - `.multirun/*.log` — training-time val_loss logs for the InfoNCE figures
 3. **Generate figures.** From `experiment/`:
    ```
    python plot_baseline_val_curves.py
@@ -129,6 +128,8 @@ runs (8-{32,64,128,256,512}) fit single-node.
 
 ## Citation
 
+Companion eval data: <https://doi.org/10.5281/zenodo.20171021>
+
 ```
-<TODO: bibtex once preprint is up>
+<TODO: paper bibtex once preprint is up>
 ```
