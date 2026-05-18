@@ -566,18 +566,21 @@ if __name__ == "__main__":
         assignments = build_assignments(config)
 
         for step_number in tqdm(new_step_numbers):
-            checkpoints.add(step_number)
-
             step_dir = checkpoint_dir / f"step-{step_number:06d}"
             try:
                 eval_model, config, _ = load_eval_model_from_checkpoint(
                     step_dir, experiment_dir, device
                 )
-            except RuntimeError as e:
-                if "size mismatch" in str(e):
+            except (RuntimeError, EOFError, OSError) as e:
+                msg = str(e)
+                if ("size mismatch" in msg
+                        or "PytorchStreamReader" in msg
+                        or "central directory" in msg
+                        or "Ran out of input" in msg):
                     print(f"Skipping checkpoint {step_number}: {e}")
                     continue
                 raise
+            checkpoints.add(step_number)
             with torch.inference_mode():
                 for assignment, name in tqdm(assignments, unit="metric"):
                     torch.random.manual_seed(1024)
