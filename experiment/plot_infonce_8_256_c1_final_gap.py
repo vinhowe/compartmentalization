@@ -54,7 +54,11 @@ def render(figsize, fontsize_tweak=False, step_match=False, drop_c5=False):
     s_c1, l_c1 = avg_compartment_curve(metrics, C1_BASELINE_KEY, 1)
     c1_final = float(l_c1[-1])
 
-    XMIN = 100_000
+    # XMIN is a floor (drops the random-init descent that would dominate a
+    # log-x panel); XMAX comes from step-matching if requested, else data.
+    # YMIN/YMAX are derived from data inside the visible x-window so the
+    # log-y panel doesn't waste headroom on points off-screen.
+    XMIN = 10_000
     XMAX = None
     if step_match:
         # Clip to min(latest val step) across all included runs (drop c=5).
@@ -69,6 +73,7 @@ def render(figsize, fontsize_tweak=False, step_match=False, drop_c5=False):
                 per_c_max.append(float(s[-1]))
         XMAX = min(per_c_max) if per_c_max else None
 
+    line_data = []  # (s, gap) per visible line for ylim sizing below
     for c, infonce_key, base_key in RUNS:
         if (step_match or drop_c5) and c in STEP_MATCH_DROP:
             continue
@@ -77,14 +82,16 @@ def render(figsize, fontsize_tweak=False, step_match=False, drop_c5=False):
             continue
         s, l = avg_compartment_curve(metrics, infonce_key, c)
         gap = l - c1_final
-
-        if s.size:
-            mask = s >= XMIN
-            if XMAX is not None:
-                mask &= s <= XMAX
-            if mask.any():
-                ax.plot(s[mask], gap[mask], color=C_COLOR[c],
-                        linewidth=1.2, label=f"c={c}")
+        if not s.size:
+            continue
+        s_clip, gap_clip = s, gap
+        if XMAX is not None:
+            keep = s_clip <= XMAX
+            s_clip, gap_clip = s_clip[keep], gap_clip[keep]
+        if s_clip.size:
+            ax.plot(s_clip, gap_clip, color=C_COLOR[c],
+                    linewidth=1.2, label=f"c={c}")
+            line_data.append((s_clip, gap_clip))
 
         if base_key in metrics:
             _, l_base = avg_compartment_curve(metrics, base_key, c)
@@ -92,10 +99,23 @@ def render(figsize, fontsize_tweak=False, step_match=False, drop_c5=False):
             ax.axhline(no_infonce_residual, color=C_COLOR[c],
                        linewidth=1.6, alpha=0.6, linestyle=":")
 
-    ax.axhline(0.0, color="black", linewidth=0.5, alpha=0.3)
     ax.set_xscale("log")
+    ax.set_yscale("log")
     ax.set_xlim(left=XMIN, right=XMAX)
-    ax.set_ylim(-0.05, 0.6)
+    # Y-axis bounds from data inside the visible x-window only.
+    visible_max = -float("inf")
+    visible_min_pos = float("inf")
+    for s_clip, gap_clip in line_data:
+        win = (s_clip >= XMIN) & (s_clip <= (XMAX if XMAX is not None else s_clip.max()))
+        if not win.any():
+            continue
+        gw = gap_clip[win]
+        visible_max = max(visible_max, float(gw.max()))
+        pos = gw[gw > 0]
+        if pos.size:
+            visible_min_pos = min(visible_min_pos, float(pos.min()))
+    if visible_max > 0 and visible_min_pos < float("inf"):
+        ax.set_ylim(visible_min_pos / 1.5, visible_max * 1.15)
     ax.set_xlabel("Step")
     ax.set_ylabel("c=N val − c=1 final val (nats)")
     ax.yaxis.label.set_size(8)
