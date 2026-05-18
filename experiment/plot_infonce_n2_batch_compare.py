@@ -1,13 +1,14 @@
-"""c=2 InfoNCE batch-size comparison: 32 vs 128 vs (later) 512.
+"""c=2 InfoNCE batch-size comparison: 32 vs 128 vs 512.
 
 Plots val-loss residual to fully-trained c=1 baseline over training step,
 to mirror body Fig 7's framing. Includes the c=2 no-InfoNCE plateau as a
 horizontal reference.
+
+Reads named-checkpoint eval results from `val_metrics.json`.
 """
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import matplotlib
@@ -17,76 +18,56 @@ import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style
 from _run_paths import (
-    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_C2_LOGS_BY_BATCH,
+    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_C2_BY_BATCH,
 )
 
 
-VAL_PAT = re.compile(r"^step (\d+): train loss [\d.]+, val loss ([\d.]+)")
-
-
-def parse_val_log(path):
-    if not Path(path).exists():
-        return {}
-    seen = {}
-    with open(path) as f:
-        for line in f:
-            m = VAL_PAT.match(line)
-            if m:
-                seen[int(m.group(1))] = float(m.group(2))
-    return seen
+def avg_compartment_curve(metrics, key, c):
+    v = metrics[key]
+    s = np.array(v["checkpoints"], dtype=float)
+    losses = np.mean(
+        [np.array(v["metrics"][f"loss_compartment_{ci}"]) for ci in range(c)], axis=0
+    )
+    o = np.argsort(s)
+    return s[o], losses[o]
 
 
 C1_BASELINE_KEY = C1_BASELINE_8_256
 C2_BASELINE_KEY = NO_INFONCE_8_256_BY_C[2]
 
 
-# (label, log_paths, color)
+# (label, run_key, color)
 RUNS = [
-    ("InfoNCE n=32 (canonical)", INFONCE_8_256_C2_LOGS_BY_BATCH[32], "tab:blue"),
-    ("InfoNCE n=128",            INFONCE_8_256_C2_LOGS_BY_BATCH[128], "tab:orange"),
-    ("InfoNCE n=512",            INFONCE_8_256_C2_LOGS_BY_BATCH[512], "tab:green"),
+    ("InfoNCE n=32 (canonical)", INFONCE_8_256_C2_BY_BATCH[32],  "tab:blue"),
+    ("InfoNCE n=128",            INFONCE_8_256_C2_BY_BATCH[128], "tab:orange"),
+    ("InfoNCE n=512",            INFONCE_8_256_C2_BY_BATCH[512], "tab:green"),
 ]
-
-
-def get_baseline_finals():
-    m = json.loads(Path("val_metrics.json").read_text())
-    c1 = m[C1_BASELINE_KEY]["metrics"]["loss_compartment_0"][-1]
-    v2 = m[C2_BASELINE_KEY]
-    losses = np.mean(
-        [np.array(v2["metrics"][f"loss_compartment_{i}"]) for i in range(2)],
-        axis=0,
-    )
-    c2 = float(losses[-1])
-    return float(c1), c2
-
 
 STEP_MATCH_CAP = 1_580_000
 
 
 def _render(figsize, fontsize_tweak=False, xmin=10_000, xmax=STEP_MATCH_CAP):
-    c1_final, c2_final = get_baseline_finals()
+    metrics = json.loads(Path("val_metrics.json").read_text())
+    c1_final = float(avg_compartment_curve(metrics, C1_BASELINE_KEY, 1)[1][-1])
+    c2_final = float(avg_compartment_curve(metrics, C2_BASELINE_KEY, 2)[1][-1])
 
     fig, ax = plt.subplots(figsize=figsize)
     XMAX = 0
-    for label, log_paths, color in RUNS:
-        merged = {}
-        for p in log_paths:
-            merged.update(parse_val_log(p))
-        if not merged:
+    for label, run_key, color in RUNS:
+        if run_key not in metrics:
+            print(f"  {label}: NO DATA (key={run_key})")
             continue
-        steps = np.array(sorted(merged), dtype=float)
-        loss = np.array([merged[int(s)] for s in steps])
-        gap = loss - c1_final
-        mask = steps >= xmin
+        s, l = avg_compartment_curve(metrics, run_key, 2)
+        gap = l - c1_final
+        mask = s >= xmin
         if xmax is not None:
-            mask &= steps <= xmax
+            mask &= s <= xmax
         if mask.any():
-            ax.plot(steps[mask], gap[mask], color=color,
+            ax.plot(s[mask], gap[mask], color=color,
                     linewidth=1.4 if not fontsize_tweak else 1.2,
                     label=label)
-            XMAX = max(XMAX, float(steps[mask].max()))
+            XMAX = max(XMAX, float(s[mask].max()))
 
-    # c=2 no-InfoNCE plateau as reference.
     c2_resid = c2_final - c1_final
     plateau_label = (
         f"c=2 no-InfoNCE ({c2_final:.3f})" if fontsize_tweak
@@ -123,7 +104,6 @@ def main():
     fig.savefig(out); fig.savefig(out.with_suffix(".png"), dpi=180)
     print(f"  {out}"); plt.close(fig)
 
-    # Subfigure-ready (matches lambda sweep half size + XMIN convention).
     fig = _render(figsize=(3.6, 2.8), fontsize_tweak=True, xmin=100_000)
     out = Path("../figures/infonce_n2_batch_compare_half.pdf")
     fig.savefig(out); fig.savefig(out.with_suffix(".png"), dpi=180)

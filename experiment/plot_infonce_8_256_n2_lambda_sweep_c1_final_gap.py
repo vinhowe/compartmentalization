@@ -4,11 +4,12 @@ Five lines, one per λ ∈ {0.1, 0.7, 1.0, 1.3, 10}, all at c=2 / 8-256 rope / t
 Trajectory: InfoNCE_λ(step) − baseline_c1_final.
 Single horizontal reference: c=2 no-InfoNCE final − c=1 final (the tax to close).
 y=0 is the c=1 floor — a curve dipping below it has beaten c=1.
+
+Reads named-checkpoint eval results from `val_metrics.json`.
 """
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import matplotlib
@@ -18,41 +19,24 @@ import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style
 from _run_paths import (
-    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_C2_LOGS_BY_LAMBDA,
+    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_C2_BY_LAMBDA,
 )
 
 
-VAL_PAT = re.compile(r"^step (\d+): train loss [\d.]+, val loss ([\d.]+)")
-
-
-def parse_val_log(path):
-    if not Path(path).exists():
-        return {}
-    seen = {}
-    with open(path) as f:
-        for line in f:
-            m = VAL_PAT.match(line)
-            if m:
-                seen[int(m.group(1))] = float(m.group(2))
-    return seen
-
-
-def parse_baseline(metrics, key, c):
+def avg_compartment_curve(metrics, key, c):
     v = metrics[key]
     s = np.array(v["checkpoints"], dtype=float)
     losses = np.mean(
         [np.array(v["metrics"][f"loss_compartment_{ci}"]) for ci in range(c)], axis=0
     )
-    order = np.argsort(s)
-    return s[order], losses[order]
+    o = np.argsort(s)
+    return s[o], losses[o]
 
 
 C1_BASELINE_KEY = C1_BASELINE_8_256
 C2_BASELINE_KEY = NO_INFONCE_8_256_BY_C[2]
 
-# λ sweep at c=2.
-RUNS = sorted(INFONCE_8_256_C2_LOGS_BY_LAMBDA.items())
-
+RUNS = sorted(INFONCE_8_256_C2_BY_LAMBDA.items())
 
 STEP_MATCH_CAP = 1_580_000
 
@@ -61,7 +45,7 @@ def _render(figsize, fontsize_tweak=False, xmax=STEP_MATCH_CAP):
     metrics = json.loads(Path("val_metrics.json").read_text())
     fig, ax = plt.subplots(figsize=figsize)
 
-    s_c1, l_c1 = parse_baseline(metrics, C1_BASELINE_KEY, 1)
+    s_c1, l_c1 = avg_compartment_curve(metrics, C1_BASELINE_KEY, 1)
     c1_final = float(l_c1[-1])
 
     XMIN = 100_000
@@ -71,26 +55,22 @@ def _render(figsize, fontsize_tweak=False, xmax=STEP_MATCH_CAP):
     log_lams = np.log10(lambdas)
     norm_lams = (log_lams - log_lams.min()) / (log_lams.max() - log_lams.min())
 
-    for (lam, log_paths), nl in zip(RUNS, norm_lams):
-        merged = {}
-        for p in log_paths:
-            merged.update(parse_val_log(p))
-        steps = np.array(sorted(merged), dtype=float) if merged else np.array([])
-        loss = np.array([merged[int(s)] for s in steps]) if merged else np.array([])
-        gap = loss - c1_final
+    for (lam, run_key), nl in zip(RUNS, norm_lams):
+        if run_key not in metrics:
+            print(f"  λ={lam}: NO DATA (key={run_key})")
+            continue
+        s, l = avg_compartment_curve(metrics, run_key, 2)
+        gap = l - c1_final
+        mask = s >= XMIN
+        if xmax is not None:
+            mask &= s <= xmax
+        if mask.any():
+            ax.plot(s[mask], gap[mask], color=cmap(nl),
+                    linewidth=1.2, label=f"λ={lam:g}")
 
-        if steps.size:
-            mask = steps >= XMIN
-            if xmax is not None:
-                mask &= steps <= xmax
-            if mask.any():
-                lam_str = f"{lam:g}"
-                ax.plot(steps[mask], gap[mask], color=cmap(nl),
-                        linewidth=1.2, label=f"λ={lam_str}")
-
-    # Horizontal reference: c=2 from-scratch baseline final − c=1 final.
+    # Horizontal reference: c=2 no-InfoNCE final − c=1 final.
     if C2_BASELINE_KEY in metrics:
-        s_base, l_base = parse_baseline(metrics, C2_BASELINE_KEY, 2)
+        _, l_base = avg_compartment_curve(metrics, C2_BASELINE_KEY, 2)
         no_infonce_residual = float(l_base[-1] - c1_final)
         ax.axhline(no_infonce_residual, color="black",
                    linewidth=1.4, alpha=0.6, linestyle=":",
@@ -122,7 +102,6 @@ def main():
     out = Path("../figures/infonce_8_256_n2_lambda_sweep_c1_final_gap.pdf")
     fig.savefig(out); print(f"  {out}"); plt.close(fig)
 
-    # Subfigure-ready (~0.49 textwidth, matches plot_translation_phase_transition half size).
     fig = _render(figsize=(3.6, 2.8), fontsize_tweak=True)
     out = Path("../figures/infonce_8_256_n2_lambda_sweep_c1_final_gap_half.pdf")
     fig.savefig(out); fig.savefig(out.with_suffix(".png"), dpi=180)

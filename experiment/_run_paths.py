@@ -32,7 +32,6 @@ from pathlib import Path
 # repo-root-relative path resolution so scripts work from any cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_ROOT = _REPO_ROOT / "out" / "translation-compression"
-MULTIRUN_ROOT = _REPO_ROOT / ".multirun"
 
 
 def find_latest_run(group: str, substr: str) -> str:
@@ -48,11 +47,6 @@ def find_latest_run(group: str, substr: str) -> str:
     if not candidates:
         raise FileNotFoundError(f"no run matching {substr!r} in {group}/")
     return f"{group}/{candidates[-1]}"
-
-
-def multirun_log(stem: str) -> str:
-    """Path to a .multirun training-time val-loss log, e.g. ``multirun_log('2e75ffe5')``."""
-    return str(MULTIRUN_ROOT / f"{stem}.log" if not stem.endswith(".log") else MULTIRUN_ROOT / stem)
 
 
 # ───────────────────────────── Baselines ─────────────────────────────
@@ -102,32 +96,23 @@ INFONCE_8_256_BY_C = {
     8: "bpe16384-8-256-infonce/2026-05-02T18-30-47Z__8-256-n8-tr0-infonce__1ed1536b__s64__fd9c538__4ff10c8e",
 }
 
-# .multirun training-time val_loss logs, by c (InfoNCE is tr=0 so train-time
-# val is uncontaminated; we use it for the trajectory in Fig 7).
-INFONCE_8_256_LOGS_BY_C = {
-    2: [multirun_log("2e75ffe5"), multirun_log("823df7cf")],
-    4: [multirun_log("ef17d9d3"), multirun_log("97e2bbd0")],
-    5: [multirun_log("infonce-n5")],
-    6: [multirun_log("infonce-n6")],
-    8: [multirun_log("3842841b"), multirun_log("4cd59e61")],
-}
-
 # ────────────────── InfoNCE λ-sweep at c=2 (appendix) ──────────────────
 
-INFONCE_8_256_C2_LOGS_BY_LAMBDA = {
-    0.1:  [multirun_log("313a7eb6")],
-    0.7:  [multirun_log("56c1aa3f")],
-    1.0:  [multirun_log("2e75ffe5"), multirun_log("823df7cf")],
-    1.3:  [multirun_log("39c9fc8c")],
-    10.0: [multirun_log("379c91b0")],
+# Run-dir keys for the c=2 λ sweep. λ=1.0 reuses the c=2 cell from the c-sweep.
+INFONCE_8_256_C2_BY_LAMBDA = {
+    0.1:  "bpe16384-8-256-infonce/2026-05-03T23-43-13Z__8-256-n2-tr0-infonce-lambda0p1__f2b65d43__s64__fd9c538__8075da3a",
+    0.7:  "bpe16384-8-256-infonce/2026-05-04T14-35-06Z__8-256-n2-tr0-infonce-lambda0p7__cbbc36b5__s64__fd9c538__280ceebf",
+    1.0:  INFONCE_8_256_BY_C[2],
+    1.3:  "bpe16384-8-256-infonce/2026-05-04T14-34-26Z__8-256-n2-tr0-infonce-lambda1p3__26697d8d__s64__fd9c538__cc88cd7d",
+    10.0: "bpe16384-8-256-infonce/2026-05-03T23-43-18Z__8-256-n2-tr0-infonce-lambda10__7257454a__s64__fd9c538__6a0a7ec8",
 }
 
 # ────────────────── InfoNCE batch sweep at c=2, λ=1 (appendix) ──────────
 
-INFONCE_8_256_C2_LOGS_BY_BATCH = {
-    32:  [multirun_log("2e75ffe5"), multirun_log("823df7cf")],
-    128: [multirun_log("infonce-n2-batch128")],
-    512: [multirun_log("infonce-n2-batch512")],
+INFONCE_8_256_C2_BY_BATCH = {
+    32:  INFONCE_8_256_BY_C[2],
+    128: "bpe16384-8-256-infonce/2026-05-07T21-37-07Z__8-256-n2-tr0-infonce-batch128__f097492e__s64__fd9c538__356f836c",
+    512: "bpe16384-8-256-infonce/2026-05-08T15-44-59Z__8-256-n2-tr0-infonce-batch512__cb4baf32__s64__fd9c538__0069bb31",
 }
 
 # ───────────────────────────── 1B (Fig 6) ─────────────────────────────
