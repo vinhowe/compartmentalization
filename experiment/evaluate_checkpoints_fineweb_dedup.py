@@ -418,10 +418,17 @@ if __name__ == "__main__":
             existing_data = {}
         else:
             existing_data = get_existing_metrics(experiment)
-        metrics = defaultdict(
-            list, existing_data.get("metrics", {})
-        )
-        checkpoints = set(existing_data.get("checkpoints", []))
+        # Store metrics keyed by step so re-sort at save time stays aligned.
+        # Earlier versions kept `metrics` as parallel arrays in append order
+        # while saving `checkpoints: sorted(...)`; mixing old + new steps
+        # silently misaligned losses with steps. By-step storage avoids this.
+        existing_checkpoints: list[int] = list(existing_data.get("checkpoints", []))
+        existing_metrics: dict = existing_data.get("metrics", {})
+        metrics_by_step: dict[str, dict[int, float]] = defaultdict(dict)
+        for _name, _vals in existing_metrics.items():
+            for _step, _val in zip(existing_checkpoints, _vals):
+                metrics_by_step[_name][int(_step)] = _val
+        checkpoints = set(int(s) for s in existing_checkpoints)
 
         step_numbers = sorted(
             [
@@ -718,15 +725,27 @@ if __name__ == "__main__":
                             batch_trans.append(masked_mean(per_token_loss, ref_mask | tgt_mask).item())
 
                     import numpy as _np
-                    metrics[f"loss_{name}"].append(float(_np.mean(batch_full)))
+                    metrics_by_step[f"loss_{name}"][step_number] = float(_np.mean(batch_full))
                     if assignment.kind == 1:
-                        metrics[f"loss_reference_{name}"].append(float(_np.mean(batch_ref)))
-                        metrics[f"loss_target_{name}"].append(float(_np.mean(batch_tgt)))
-                        metrics[f"loss_translation_tokens_{name}"].append(float(_np.mean(batch_trans)))
+                        metrics_by_step[f"loss_reference_{name}"][step_number] = float(_np.mean(batch_ref))
+                        metrics_by_step[f"loss_target_{name}"][step_number] = float(_np.mean(batch_tgt))
+                        metrics_by_step[f"loss_translation_tokens_{name}"][step_number] = float(_np.mean(batch_trans))
 
+        sorted_steps = sorted(checkpoints)
+        aligned_metrics = {
+            name: [step_map[s] for s in sorted_steps if s in step_map]
+            for name, step_map in metrics_by_step.items()
+        }
+        # Sanity check: any metric whose length doesn't match sorted_steps
+        # had per-step holes. Drop such metrics rather than emit misaligned
+        # arrays — they would silently break the parallel-array invariant.
+        for _name in list(aligned_metrics.keys()):
+            if len(aligned_metrics[_name]) != len(sorted_steps):
+                print(f"  WARNING: metric {_name!r} has {len(aligned_metrics[_name])} values for {len(sorted_steps)} steps; dropping")
+                del aligned_metrics[_name]
         experiment_result = {
-            "metrics": dict(metrics),
-            "checkpoints": sorted(list(checkpoints)),
+            "metrics": aligned_metrics,
+            "checkpoints": sorted_steps,
             "data_source": "uniform" if use_uniform_data else "pretokenized",
         }
         val_metrics[experiment] = experiment_result
