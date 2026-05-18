@@ -94,7 +94,8 @@ def panel_wd_for_c(ax, cells, target_c, c1_floor, title=None):
         color = cmap(i / max(1, len(trs) - 1))
         ax.plot(wds, vals, color=color, marker="o",
                 markersize=4, linewidth=1.4, label=f"tr={tr:g}")
-    ax.axhline(c1_floor, color="black", linewidth=0.6, alpha=0.5, linestyle=":")
+    ax.axhline(c1_floor, color="black", linewidth=0.6, alpha=0.5,
+               linestyle=":", label="c=1 baseline")
     ax.set_xlabel("wd")
     if title is not None:
         ax.set_title(title)
@@ -161,9 +162,8 @@ def main():
     fig, ax = plt.subplots(figsize=(2.4, 2.0))
     panel_A(ax, cells, c1_floor)
 
-    ax.legend(loc="lower left",
-              frameon=True, facecolor="white", edgecolor="none",
-              framealpha=0.9, fontsize=7.3,
+    ax.legend(loc="lower left", bbox_to_anchor=(0, 0.05),
+              frameon=False, fontsize=7.3,
               handlelength=1.0, handletextpad=0.3, ncol=4,
               columnspacing=0.6, borderpad=0.2)
     fig.tight_layout(pad=0.3)
@@ -175,10 +175,11 @@ def main():
     fig, axes = plt.subplots(1, 3, figsize=(7.8, 2.8), sharey=True)
     for ax, c in zip(axes, [5, 6, 8]):
         panel_wd_for_c(ax, cells, c, c1_floor)
-        ax.text(0.97, 0.03, f"c={c}", transform=ax.transAxes,
+        ax.text(0.97, 0.06, f"c={c}", transform=ax.transAxes,
                 ha="right", va="bottom", fontsize=8)
     axes[0].set_ylabel("val loss (nats)")
-    axes[0].legend(loc="lower left", frameon=False, fontsize=7,
+    axes[0].legend(loc="lower left", bbox_to_anchor=(0, 0.03),
+                   frameon=False, fontsize=7,
                    handlelength=1.3, handletextpad=0.4,
                    title="translation ratio", title_fontsize=7)
     fig.tight_layout()
