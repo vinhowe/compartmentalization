@@ -89,7 +89,7 @@ def main():
     ax.set_xscale("log")
     # Crop y to the convergence band; the early random-init descent is
     # cosmetic and dragged the label/arrow placement down.
-    YMIN, YMAX = 3.7, 5.0
+    YMIN, YMAX = 3.55, 5.0
     ax.set_ylim(YMIN, YMAX)
     # Then crop x to where the data is actually inside the y-band, so the
     # first half of the panel isn't empty.
