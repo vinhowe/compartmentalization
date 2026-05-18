@@ -12,7 +12,6 @@ asymptote, both compared against the strongest available c=1 number.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import matplotlib
@@ -22,39 +21,25 @@ import numpy as np
 
 from plot_baseline_val_curves import setup_paper_style, C_COLOR
 from _run_paths import (
-    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_LOGS_BY_C,
+    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_BY_C,
+    filter_to_loggy,
 )
 
 
-VAL_PAT = re.compile(r"^step (\d+): train loss [\d.]+, val loss ([\d.]+)")
-
-
-def parse_val_log(path):
-    if not Path(path).exists():
-        return {}
-    seen = {}
-    with open(path) as f:
-        for line in f:
-            m = VAL_PAT.match(line)
-            if m:
-                seen[int(m.group(1))] = float(m.group(2))
-    return seen
-
-
-def parse_baseline(metrics, key, c):
+def avg_compartment_curve(metrics, key, c):
     v = metrics[key]
     s = np.array(v["checkpoints"], dtype=float)
     losses = np.mean(
         [np.array(v["metrics"][f"loss_compartment_{ci}"]) for ci in range(c)], axis=0
     )
-    order = np.argsort(s)
-    return s[order], losses[order]
+    o = np.argsort(s)
+    return filter_to_loggy(s[o], losses[o])
 
 
 C1_BASELINE_KEY = C1_BASELINE_8_256
 
-# (c, infonce_log_paths, c=N from-scratch baseline key)
-RUNS = [(c, INFONCE_8_256_LOGS_BY_C[c], NO_INFONCE_8_256_BY_C[c]) for c in (2, 4, 5, 6, 8)]
+# (c, InfoNCE run key, c=N no-InfoNCE baseline key)
+RUNS = [(c, INFONCE_8_256_BY_C[c], NO_INFONCE_8_256_BY_C[c]) for c in (2, 4, 5, 6, 8)]
 
 # Step-matched view: clip everyone to the latest step c=8 has reached, drop c=5.
 # c=6 will catch up to this bound by submission deadline.
@@ -66,7 +51,7 @@ def render(figsize, fontsize_tweak=False, step_match=False, drop_c5=False):
     Path("../figures").mkdir(exist_ok=True)
     fig, ax = plt.subplots(figsize=figsize)
 
-    s_c1, l_c1 = parse_baseline(metrics, C1_BASELINE_KEY, 1)
+    s_c1, l_c1 = avg_compartment_curve(metrics, C1_BASELINE_KEY, 1)
     c1_final = float(l_c1[-1])
 
     XMIN = 100_000
@@ -74,36 +59,35 @@ def render(figsize, fontsize_tweak=False, step_match=False, drop_c5=False):
     if step_match:
         # Clip to min(latest val step) across all included runs (drop c=5).
         per_c_max = []
-        for c, log_paths, _ in RUNS:
+        for c, infonce_key, _ in RUNS:
             if c in STEP_MATCH_DROP:
                 continue
-            merged = {}
-            for p in log_paths:
-                merged.update(parse_val_log(p))
-            if merged:
-                per_c_max.append(max(merged))
+            if infonce_key not in metrics:
+                continue
+            s, _ = avg_compartment_curve(metrics, infonce_key, c)
+            if s.size:
+                per_c_max.append(float(s[-1]))
         XMAX = min(per_c_max) if per_c_max else None
 
-    for c, log_paths, base_key in RUNS:
+    for c, infonce_key, base_key in RUNS:
         if (step_match or drop_c5) and c in STEP_MATCH_DROP:
             continue
-        merged = {}
-        for p in log_paths:
-            merged.update(parse_val_log(p))
-        steps = np.array(sorted(merged), dtype=float) if merged else np.array([])
-        loss = np.array([merged[int(s)] for s in steps]) if merged else np.array([])
-        gap = loss - c1_final
+        if infonce_key not in metrics:
+            print(f"  c={c}: NO DATA (key={infonce_key})")
+            continue
+        s, l = avg_compartment_curve(metrics, infonce_key, c)
+        gap = l - c1_final
 
-        if steps.size:
-            mask = steps >= XMIN
+        if s.size:
+            mask = s >= XMIN
             if XMAX is not None:
-                mask &= steps <= XMAX
+                mask &= s <= XMAX
             if mask.any():
-                ax.plot(steps[mask], gap[mask], color=C_COLOR[c],
+                ax.plot(s[mask], gap[mask], color=C_COLOR[c],
                         linewidth=1.2, label=f"c={c}")
 
         if base_key in metrics:
-            s_base, l_base = parse_baseline(metrics, base_key, c)
+            _, l_base = avg_compartment_curve(metrics, base_key, c)
             no_infonce_residual = float(l_base[-1] - c1_final)
             ax.axhline(no_infonce_residual, color=C_COLOR[c],
                        linewidth=1.6, alpha=0.6, linestyle=":")
