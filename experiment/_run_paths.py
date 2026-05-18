@@ -201,3 +201,35 @@ RUNS_SMALL_SCALE_TR01 = {
     (128, 6): "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-128-n6-tr01__a6e55f01__s64__fd9c538__309edd86",
     (128, 8): "bpe16384-rope-small-scale-tr01-epoch/2026-04-24T00-42-11Z__8-128-n8-tr01__0caca982__s64__fd9c538__be47d71b",
 }
+
+
+# ────────────────────── Loggy step filter (defensive) ───────────────────────
+#
+# val_metrics.json entries that mix old loggy + dense periodic saves can be
+# misaligned if the eval pipeline appended new values out of step order.
+# Plot scripts should call `filter_to_loggy(steps, *values)` when consuming
+# any entry that may contain dense periodic saves — this keeps figures
+# robust to the underlying alignment.
+LOGGY_STEPS = frozenset({
+    100, 850, 3500, 7000, 14000, 29000, 60000, 120000,
+    200000, 240000, 300000, 350000, 400000, 500000, 1000000,
+    # Post-1M extension for runs that train past 1M (c=1 8-256 went to 2M).
+    1250000, 1500000, 1750000, 2000000, 2250000, 2500000, 2750000, 2950000,
+})
+
+
+def filter_to_loggy(steps, *arrays):
+    """Filter parallel (steps, value_array_1, value_array_2, ...) to keep
+    only entries whose step is in LOGGY_STEPS. Returns numpy arrays.
+
+    Use this when reading val_metrics for runs that may have dense periodic
+    saves interleaved with old loggy entries — the eval re-aligner already
+    keeps things in order for fresh runs, but old data may still be present.
+    """
+    import numpy as _np
+    s = _np.asarray(steps)
+    mask = _np.isin(s, list(LOGGY_STEPS))
+    out = [s[mask]]
+    for a in arrays:
+        out.append(_np.asarray(a)[mask])
+    return tuple(out)

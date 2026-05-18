@@ -32,6 +32,7 @@ import numpy as np
 from plot_baseline_val_curves import (
     setup_paper_style, PANELS, C_COLOR, avg_compartment_loss, d_label,
 )
+from _run_paths import filter_to_loggy
 
 
 def get_curve(metrics, key, c) -> tuple[np.ndarray, np.ndarray]:
@@ -47,7 +48,7 @@ def get_curve(metrics, key, c) -> tuple[np.ndarray, np.ndarray]:
     # Sort by step (should already be) and ensure monotone-decreasing val
     # (clip non-monotone tail by enforcing running min so interp is sensible).
     order = np.argsort(s)
-    return s[order], l[order]
+    return filter_to_loggy(s[order], l[order])
 
 
 def interp_iter_at_loss(target_loss: float, steps: np.ndarray, losses: np.ndarray):

@@ -29,7 +29,7 @@ from plot_compartmented_slowdown import slowdown_points
 from _run_paths import (
     C1_BASELINE_8_256, C1_BASELINE_BY_SCALE,
     NO_INFONCE_8_256_BY_C, COPYEMB_8_256_BY_C, COPYEMB_C2_BY_SCALE,
-    RUNS_SMALL_SCALE_TR01,
+    RUNS_SMALL_SCALE_TR01, filter_to_loggy,
 )
 
 
@@ -61,7 +61,7 @@ def get_curve(metrics, key, c):
         return np.array([]), np.array([])
     l = np.array(losses, dtype=float)
     order = np.argsort(s)
-    return s[order], l[order]
+    return filter_to_loggy(s[order], l[order])
 
 
 def fig_body(metrics):

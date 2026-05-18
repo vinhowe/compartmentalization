@@ -17,7 +17,7 @@ from plot_baseline_val_curves import (
     setup_paper_style, C_COLOR, avg_compartment_loss,
 )
 from plot_compartmented_slowdown import interp_iter_at_loss
-from _run_paths import RUNS_8_512_LEGACY_BY_C
+from _run_paths import RUNS_8_512_LEGACY_BY_C, filter_to_loggy
 
 
 KEY_C1 = RUNS_8_512_LEGACY_BY_C[1]
@@ -31,7 +31,7 @@ def get_curve(metrics, key, c):
     losses = avg_compartment_loss(v["metrics"], c, len(s))
     l = np.array(losses, dtype=float)
     order = np.argsort(s)
-    return s[order], l[order]
+    return filter_to_loggy(s[order], l[order])
 
 
 def main():

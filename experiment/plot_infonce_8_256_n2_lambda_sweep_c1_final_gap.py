@@ -20,6 +20,7 @@ import numpy as np
 from plot_baseline_val_curves import setup_paper_style
 from _run_paths import (
     C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, INFONCE_8_256_C2_BY_LAMBDA,
+    filter_to_loggy,
 )
 
 
@@ -30,7 +31,7 @@ def avg_compartment_curve(metrics, key, c):
         [np.array(v["metrics"][f"loss_compartment_{ci}"]) for ci in range(c)], axis=0
     )
     o = np.argsort(s)
-    return s[o], losses[o]
+    return filter_to_loggy(s[o], losses[o])
 
 
 C1_BASELINE_KEY = C1_BASELINE_8_256

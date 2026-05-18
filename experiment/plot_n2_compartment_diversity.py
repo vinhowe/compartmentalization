@@ -29,7 +29,10 @@ from plot_baseline_val_curves import setup_paper_style
 from plot_compartmented_slowdown import (
     interp_iter_at_loss, slowdown_points,
 )
-from _run_paths import C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, N2_DIVERSITY_RUNS
+from _run_paths import (
+    C1_BASELINE_8_256, NO_INFONCE_8_256_BY_C, N2_DIVERSITY_RUNS,
+    filter_to_loggy,
+)
 
 
 N1_BASELINE_KEY = C1_BASELINE_8_256
@@ -63,7 +66,8 @@ def get_english_curve(metrics, key_or_keys):
     if not common:
         return np.array([]), np.array([])
     means = [float(np.mean([d[s] for d in per_run])) for s in common]
-    return np.array(common), np.array(means)
+    s_arr, l_arr = filter_to_loggy(common, means)
+    return s_arr, l_arr
 
 
 def plot_val_into(ax, metrics):
