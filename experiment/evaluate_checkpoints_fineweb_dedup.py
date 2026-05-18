@@ -678,7 +678,7 @@ if __name__ == "__main__":
                     # Average across N_EVAL_BATCHES per assignment to suppress
                     # single-batch noise (especially visible on bf16-saved named
                     # checkpoints where one batch can land 0.05+ nats off mean).
-                    N_EVAL_BATCHES = 10
+                    N_EVAL_BATCHES = 100
                     batch_full = []
                     batch_ref = []
                     batch_tgt = []
