@@ -1,6 +1,5 @@
-# Language models struggle with compartmentalization
+# Language models struggle with compartmentalization [(arxiv)](https://arxiv.org/abs/2605.19284)
 
-Companion code for the [paper of the same name](https://arxiv.org/abs/2605.19284).
 Reproduces every figure from the precomputed eval JSONs we ship via Zenodo,
 and lets you retrain any individual run via `train.py` / `sweep_runner.py`.
 
