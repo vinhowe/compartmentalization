@@ -1,8 +1,8 @@
 # Language models struggle with compartmentalization
 
-Companion code for the paper of the same name (preprint). Reproduces
-every figure from the precomputed eval JSONs we ship via Zenodo, and
-lets you retrain any individual run via `train.py` / `sweep_runner.py`.
+Companion code for the [paper of the same name](https://arxiv.org/abs/2605.19284).
+Reproduces every figure from the precomputed eval JSONs we ship via Zenodo,
+and lets you retrain any individual run via `train.py` / `sweep_runner.py`.
 
 ## What's in here
 
@@ -128,8 +128,16 @@ runs (8-{32,64,128,256,512}) fit single-node.
 
 ## Citation
 
-Companion eval data: <https://doi.org/10.5281/zenodo.20171021>
+Preprint: <https://arxiv.org/abs/2605.19284>. Companion eval data: <https://doi.org/10.5281/zenodo.20171021>.
 
 ```
-<TODO: paper bibtex once preprint is up>
+@misc{howe2026compartmentalization,
+      title={Language models struggle with compartmentalization},
+      author={Thomas Vincent Howe and David Wingate},
+      year={2026},
+      eprint={2605.19284},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2605.19284},
+}
 ```
