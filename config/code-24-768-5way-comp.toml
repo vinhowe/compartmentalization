@@ -1,0 +1,60 @@
+# 5-way suite: compartmented (c=5), one compartment per lang.
+# Scale: 24-768 (24 layers, n_head=12, n_embd=768, block_size=512).
+# eff_batch = 32 * 8 * 512 = 131,072 tok/iter -> 60,000 iters = 7.86B tokens.
+
+[data]
+compartment_train_bins = ["bins/python/train_*.bin", "bins/javascript/train_*.bin", "bins/go/train_*.bin", "bins/rust/train_*.bin", "bins/c/train_*.bin"]
+compartment_val_bins = ["bins/python/val_*.bin", "bins/javascript/val_*.bin", "bins/go/val_*.bin", "bins/rust/val_*.bin", "bins/c/val_*.bin"]
+
+[model]
+n_layer = 24
+n_head = 12
+n_embd = 768
+block_size = 512
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 60000
+batch_size = 32
+gradient_accumulation_steps = 8
+eval_interval = 2000
+eval_iters = 1
+log_interval = 10
+always_save_checkpoint = true
+seed = 64
+
+[optimizer]
+learning_rate = 3e-4
+weight_decay = 0.0
+
+[lr]
+decay_lr = true
+warmup_iters = 1000
+lr_decay_iters = 30000
+min_lr = 3e-5
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "code-24-768-5way-comp"
+wandb_group = "code-5way-baselines"
+
+[experiment]
+n_compartments = 5
+compartment_scaling = "equal"
+translation_ratio = 0.0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+assignment_seed = 64
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = true
+translation_mode = "standard"
+translation_chunk_size = 4
