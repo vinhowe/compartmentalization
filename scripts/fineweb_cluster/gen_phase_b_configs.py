@@ -29,9 +29,14 @@ def preamble(name: str, description: str) -> str:
 
 
 def model_block() -> str:
+    # NB: not using size_tier because the ORC-side presets.py doesn't have
+    # an 8-512 entry. Explicit n_layer/n_head/n_embd matches the paper's
+    # saved config for the marquee 8-512 fineweb runs verbatim.
     return textwrap.dedent("""\
         [model]
-        size_tier = "8-512"
+        n_layer = 8
+        n_head = 16
+        n_embd = 512
         block_size = 64
         vocab_size = 16384
         weight_tying = false

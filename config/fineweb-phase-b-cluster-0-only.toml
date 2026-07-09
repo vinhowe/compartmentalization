@@ -8,7 +8,9 @@ train_bin = "bins/cluster_0/train_*.bin"
 val_bin = "bins/cluster_0/val_*.bin"
 
 [model]
-size_tier = "8-512"
+n_layer = 8
+n_head = 16
+n_embd = 512
 block_size = 64
 vocab_size = 16384
 weight_tying = false
