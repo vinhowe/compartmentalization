@@ -1,0 +1,56 @@
+# Phase B: cluster-0-only ceiling on FineWeb tf-idf K=2 partition.
+# Matches paper's marquee 8-512 fineweb recipe (size_tier 8-512, RoPE, no weight decay,
+# no LR decay, lr=2e-5) with only n_compartments + data differing between arms.
+# Total budget: 6,400 iters × 131,072 tok/iter = 0.84B tokens.
+
+[data]
+train_bin = "bins/cluster_0/train_*.bin"
+val_bin = "bins/cluster_0/val_*.bin"
+
+[model]
+size_tier = "8-512"
+block_size = 64
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 6400
+batch_size = 128
+gradient_accumulation_steps = 16
+eval_interval = 2000
+eval_iters = 1
+log_interval = 10
+always_save_checkpoint = true
+seed = 64
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0
+
+[lr]
+warmup_iters = 1000
+decay_lr = false
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "fineweb-phase-b-cluster-0-only"
+wandb_group = "fineweb-phase-b"
+
+[experiment]
+n_compartments = 1
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = true
+translation_mode = "standard"
+translation_chunk_size = 4
