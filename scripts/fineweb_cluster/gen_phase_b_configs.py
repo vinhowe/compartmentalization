@@ -77,7 +77,7 @@ def logging_block(name: str) -> str:
         wandb_log = true
         wandb_project = "translation-compression"
         wandb_run_name = "{name}"
-        wandb_group = "fineweb-phase-b"
+        wandb_group = "{TAG}"
         """)
 
 
@@ -114,10 +114,14 @@ def experiment_block_c2() -> str:
         """)
 
 
+TAG = "fineweb-phase-b"
+K_GLOBAL = 2
+
+
 def config_cluster_only(cluster: int) -> tuple[str, str]:
-    name = f"fineweb-phase-b-cluster-{cluster}-only"
+    name = f"{TAG}-cluster-{cluster}-only"
     body = "\n".join([
-        preamble(name, f"Phase B: cluster-{cluster}-only ceiling on FineWeb tf-idf K=2 partition."),
+        preamble(name, f"Phase B: cluster-{cluster}-only ceiling on FineWeb tf-idf K={K_GLOBAL} partition."),
         f'[data]\ntrain_bin = "bins/cluster_{cluster}/train_*.bin"\nval_bin = "bins/cluster_{cluster}/val_*.bin"\n',
         model_block(),
         training_block(),
@@ -128,9 +132,9 @@ def config_cluster_only(cluster: int) -> tuple[str, str]:
 
 
 def config_joint() -> tuple[str, str]:
-    name = "fineweb-phase-b-joint"
+    name = f"{TAG}-joint"
     body = "\n".join([
-        preamble(name, "Phase B: joint c=1 on interleaved FineWeb (K=2 mixed)."),
+        preamble(name, f"Phase B: joint c=1 on interleaved FineWeb (K={K_GLOBAL} mixed)."),
         '[data]\ntrain_bin = "bins/joint_mixed/train_*.bin"\nval_bin = "bins/joint_mixed/val_cluster_0.bin"\n',
         model_block(),
         training_block(),
@@ -140,19 +144,38 @@ def config_joint() -> tuple[str, str]:
     return name, body
 
 
-def config_comp() -> tuple[str, str]:
-    name = "fineweb-phase-b-comp"
+def experiment_block_comp_ck(k: int) -> str:
+    return textwrap.dedent(f"""\
+        [experiment]
+        n_compartments = {k}
+        compartment_scaling = "equal"
+        translation_ratio = 0
+        translation_ratio_mode = "absolute"
+        max_compartments = 16
+        assignment_seed = 64
+        use_compartment_embeddings = true
+        permute_tokens_per_compartment = false
+        permute_input_tokens_per_compartment = true
+        translation_mode = "standard"
+        translation_chunk_size = 4
+        """)
+
+
+def config_comp_k(k: int) -> tuple[str, str]:
+    name = f"{TAG}-comp"
+    train_list = ", ".join(f'"bins/cluster_{i}/train_*.bin"' for i in range(k))
+    val_list = ", ".join(f'"bins/cluster_{i}/val_*.bin"' for i in range(k))
     body = "\n".join([
-        preamble(name, "Phase B: comp c=2 with cluster as compartment ID."),
+        preamble(name, f"Phase B: comp c={k} with cluster as compartment ID."),
         (
             '[data]\n'
-            'compartment_train_bins = ["bins/cluster_0/train_*.bin", "bins/cluster_1/train_*.bin"]\n'
-            'compartment_val_bins   = ["bins/cluster_0/val_*.bin",   "bins/cluster_1/val_*.bin"]\n'
+            f'compartment_train_bins = [{train_list}]\n'
+            f'compartment_val_bins   = [{val_list}]\n'
         ),
         model_block(),
         training_block(),
         logging_block(name),
-        experiment_block_c2(),
+        experiment_block_comp_ck(k),
     ])
     return name, body
 
@@ -161,12 +184,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default="config")
     ap.add_argument("--write", action="store_true")
+    ap.add_argument("--K", type=int, default=2, help="Number of clusters (2 or 8)")
+    ap.add_argument("--tag", default="fineweb-phase-b",
+                    help="Config name prefix (e.g. fineweb-phase-b or fineweb-phase-b-k8)")
     args = ap.parse_args()
     out_dir = Path(args.out_dir)
     if args.write:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    configs = [config_cluster_only(0), config_cluster_only(1), config_joint(), config_comp()]
+    global TAG, K_GLOBAL
+    TAG = args.tag
+    K_GLOBAL = args.K
+
+    configs = [config_cluster_only(i) for i in range(args.K)]
+    configs.append(config_joint())
+    configs.append(config_comp_k(args.K))
     for name, body in configs:
         p = out_dir / f"{name}.toml"
         if args.write:

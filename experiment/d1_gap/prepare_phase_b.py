@@ -99,8 +99,7 @@ def main():
     tfidf, svd, scaler, kmeans = (clusterer["tfidf"], clusterer["svd"],
                                     clusterer["scaler"], clusterer["kmeans"])
     K = kmeans.cluster_centers_.shape[0]
-    if K != 2:
-        raise SystemExit(f"expected K=2 clusterer, got K={K}")
+    print(f"[load] K={K} clusterer with {kmeans.cluster_centers_.shape[0]} centroids")
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(args.tokenizer)
     boundary_id = tok.token_to_id("<|endoftext|>")
