@@ -101,9 +101,48 @@ experiment/*.log
 logs/*.log
 scripts/fetch_openreview.py
 
-# Downstream benchmark results: per-item eval data, not code. Ships via Zenodo
-# with the other eval data. These were untracked but NOT ignored, so a stray
-# `git add -A` would have swept ~270MB into the repo.
-experiment/benchtraj_*.json
-experiment/benchwino_*.json
-experiment/benchitem_*.json
+# ---- experiment/ data policy ------------------------------------------------
+# Code is tracked; data is not. Eval outputs ship via Zenodo, as the eval data
+# already does. Written after finding 45 GB across 523 files that were untracked
+# but NOT ignored -- which is not safe, it just means `git add -A` stages all of
+# it (a stray one nearly committed 235 MB of benchmark output). Ignoring is what
+# makes "we don't commit data" actually true.
+
+# Tokenized corpora (~44 GB) and array caches
+experiment/fineweb_phase_b/
+experiment/fineweb_phase_b_k8/
+experiment/**/*.bin
+experiment/**/*.npy
+experiment/**/*.npz
+
+# Metric snapshots, eval scratch, figure cache
+experiment/.metrics_backup_prerename/
+experiment/.eval*/
+experiment/umap_loss_diff_cache/
+experiment/.figcache/
+
+# Backup suffixes left by rename/merge passes
+experiment/*.pre_*
+experiment/*.pre-*
+experiment/*.bak_*
+experiment/*.stale-*
+
+# Eval result families (per-item / per-checkpoint outputs)
+experiment/bench*.json
+experiment/transacc_*.json
+experiment/lencurve_*.json
+experiment/lambylen_*.json
+experiment/umap_loss_diff_*.json
+experiment/cossim_sweep*.json
+experiment/code_*.json
+experiment/fineweb_val_metrics*.json
+experiment/fineweb_phase_b*.json
+experiment/loss_vs_downstream_*.json
+experiment/trainloss*.json
+experiment/rope_extrap_*.json
+experiment/stable_offset_*.json
+experiment/tied_*.json
+experiment/d1_gap/*.json
+
+# Generated sample dumps (model output, not source)
+experiment/code_*.txt
