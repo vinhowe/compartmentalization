@@ -79,7 +79,7 @@ After training finishes, the eval pipeline lives in `experiment/`:
 ```
 cd experiment
 python evaluate_checkpoints_fineweb_dedup.py  # per-rank shards
-python merge_eval_results.py                  # merges → val_metrics.json
+python merge_eval_results.py                  # unions shards → val_metrics.json
 ```
 
 ## T3 — Retrain a grid (sweep)
