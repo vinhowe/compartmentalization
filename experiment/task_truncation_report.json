@@ -1,0 +1,79 @@
+{
+  "hellaswag": {
+    "n_records": 10042,
+    "n_pairs": 40168,
+    "ctx_only_fit": 55.984863572993426,
+    "per_pair_fit": 30.566620195180246,
+    "per_record_fit": 28.5700059749054,
+    "per_pair_truncated": 69.43337980481977,
+    "median_pair_len": 102.0,
+    "p90_pair_len": 131.0,
+    "median_ctx_len": 61.0
+  },
+  "arc_easy": {
+    "n_records": 2376,
+    "n_pairs": 9501,
+    "ctx_only_fit": 95.07420271550363,
+    "per_pair_fit": 92.26397221345121,
+    "per_record_fit": 91.4983164983165,
+    "per_pair_truncated": 7.7360277865487825,
+    "median_pair_len": 33.0,
+    "p90_pair_len": 60.0,
+    "median_ctx_len": 27.0
+  },
+  "piqa": {
+    "n_records": 1838,
+    "n_pairs": 3676,
+    "ctx_only_fit": 100.0,
+    "per_pair_fit": 86.09902067464635,
+    "per_record_fit": 85.69096844396083,
+    "per_pair_truncated": 13.900979325353646,
+    "median_pair_len": 35.0,
+    "p90_pair_len": 74.0,
+    "median_ctx_len": 17.0
+  },
+  "sciq": {
+    "n_records": 1000,
+    "n_pairs": 4000,
+    "ctx_only_fit": 99.9,
+    "per_pair_fit": 99.9,
+    "per_record_fit": 99.9,
+    "per_pair_truncated": 0.10000000000000009,
+    "median_pair_len": 26.0,
+    "p90_pair_len": 37.0,
+    "median_ctx_len": 24.0
+  },
+  "lambada": {
+    "n_records": 5153,
+    "n_pairs": 5153,
+    "ctx_only_fit": 5.453134096642732,
+    "per_pair_fit": 2.852707160877159,
+    "per_record_fit": 2.852707160877159,
+    "per_pair_truncated": 97.14729283912284,
+    "median_pair_len": 80.0,
+    "p90_pair_len": 100.0,
+    "median_ctx_len": 79.0
+  },
+  "winogrande": {
+    "n_records": 1267,
+    "n_pairs": 2534,
+    "ctx_only_fit": 100.0,
+    "per_pair_fit": 100.0,
+    "per_record_fit": 100.0,
+    "per_pair_truncated": 0.0,
+    "median_pair_len": 24.0,
+    "p90_pair_len": 30.0,
+    "median_ctx_len": 18.0
+  },
+  "triviaqa": {
+    "n_records": 17944,
+    "n_pairs": 17944,
+    "ctx_only_fit": 99.08047258136425,
+    "per_pair_fit": 98.65693267944718,
+    "per_record_fit": 98.65693267944718,
+    "per_pair_truncated": 1.3430673205528265,
+    "median_pair_len": 30.0,
+    "p90_pair_len": 45.0,
+    "median_ctx_len": 26.0
+  }
+}

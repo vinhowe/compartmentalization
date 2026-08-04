@@ -77,6 +77,8 @@ output.png
 profile_trace.json
 
 # Paper TeX / infra (lives outside the code release)
+# paper/ is a separate git repo cloned from the Overleaf project
+paper/
 *.tex
 machines.toml
 run_sweep_gpu.sh
@@ -94,3 +96,14 @@ dann/
 token-stats-translation/
 notebooks/
 experiment/fineweb_cluster_out/
+experiment/*.log
+.nfs*
+logs/*.log
+scripts/fetch_openreview.py
+
+# Downstream benchmark results: per-item eval data, not code. Ships via Zenodo
+# with the other eval data. These were untracked but NOT ignored, so a stray
+# `git add -A` would have swept ~270MB into the repo.
+experiment/benchtraj_*.json
+experiment/benchwino_*.json
+experiment/benchitem_*.json
