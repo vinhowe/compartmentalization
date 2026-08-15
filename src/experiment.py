@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -72,21 +73,46 @@ def write_meta(out_dir: str, cfg: JobConfig) -> None:
     with open(os.path.join(meta, "config.json"), "w") as f:
         json.dump(_canonical_cfg_dict(cfg), f, indent=2)
 
-    # environment freeze (prefer uv)
+    # Freeze the exact interpreter environment. Prefer the running Python;
+    # ``uv pip freeze`` without --python can silently inspect another venv.
     try:
-        pf = subprocess.check_output(["uv", "pip", "freeze"]).decode()
+        pf = subprocess.check_output(
+            [sys.executable, "-m", "pip", "freeze"], stderr=subprocess.DEVNULL,
+        ).decode()
     except Exception:
-        pf = subprocess.check_output([sys.executable, "-m", "pip", "freeze"]).decode()
+        pf = subprocess.check_output(
+            ["uv", "pip", "freeze", "--python", sys.executable],
+            stderr=subprocess.DEVNULL,
+        ).decode()
     with open(os.path.join(meta, "pip_freeze.txt"), "w") as f:
         f.write(pf)
 
-    # git commit
-    full = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    # A content-addressed deployment intentionally has no .git directory.
+    # Retain its manifest directly and treat Git metadata as optional context.
+    deployment_manifest = os.environ.get("DEPLOYMENT_MANIFEST")
+    if deployment_manifest and os.path.isfile(deployment_manifest):
+        copied_manifest = os.path.join(meta, "deployment-manifest.json")
+        shutil.copyfile(deployment_manifest, copied_manifest)
+        with open(deployment_manifest, "rb") as handle:
+            deployment_sha256 = hashlib.sha256(handle.read()).hexdigest()
+        with open(os.path.join(meta, "deployment_manifest_sha256.txt"), "w") as f:
+            f.write(deployment_sha256 + "\n")
+
+    try:
+        full = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (OSError, subprocess.CalledProcessError):
+        full = "unavailable:content-addressed-deployment"
     with open(os.path.join(meta, "git_commit.txt"), "w") as f:
         f.write(full + "\n")
 
-    # git dirtiness
-    diff = subprocess.check_output(["git", "diff", "HEAD"]).decode()
+    try:
+        diff = subprocess.check_output(
+            ["git", "diff", "HEAD"], stderr=subprocess.DEVNULL,
+        ).decode()
+    except (OSError, subprocess.CalledProcessError):
+        diff = ""
     with open(os.path.join(meta, "git_diff.patch"), "w") as f:
         f.write(diff)
 

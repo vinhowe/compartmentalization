@@ -91,7 +91,7 @@ class UniformCompartmentDataLoader:
     max_compartments: int
     translation_ratio: float = 0.0
     translation_ratio_mode: Literal["compartment", "absolute"] = "compartment"
-    compartment_scaling: Literal["equal", "unequal"] = "equal"
+    compartment_scaling: Literal["equal", "unequal", "single"] = "equal"
     process_rank: int = 0
     num_processes: int = 1
     permute_tokens: bool = True

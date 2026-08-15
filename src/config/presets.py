@@ -63,6 +63,8 @@ def scale_batch_for_vram(cfg: JobConfig, vram_bytes: int) -> JobConfig:
     Preserves effective batch size (batch_size * grad_accum). Only applies
     when current batch config was set by BPE16384_BATCH_SPECS.
     """
+    if not cfg.training.auto_batch_config:
+        return cfg
     vram_gb = vram_bytes / (1024**3)
     if vram_gb <= BASELINE_VRAM_GB:
         return cfg
@@ -104,6 +106,8 @@ def apply_bpe16384_batch_config(cfg: JobConfig) -> JobConfig:
     Effective batch size is always 2048.
     """
     # Check preconditions
+    if not cfg.training.auto_batch_config:
+        return cfg
     if cfg.model.vocab_size != 16384:
         return cfg
     if cfg.experiment.permute_tokens_per_compartment:
