@@ -362,7 +362,7 @@ class SyntheticTokenStream:
 class AssignmentsDataLoader:
     def __init__(
         self,
-        assignments_file: str,
+        assignments_file: Optional[str],
         filename_pattern: str,
         B: int,
         T: int,
@@ -371,6 +371,9 @@ class AssignmentsDataLoader:
         base_vocab_size: int,
         max_compartments: int,
         n_compartments: int,
+        # Record count to assume when assignments_file is None (c=1). Only sets
+        # the wrap point for assignment_idx; the records themselves are constant.
+        constant_records: Optional[int] = None,
         permute_tokens: bool = False,
         permutations_path: Optional[str] = None,
         permute_inputs: bool = True,
@@ -425,21 +428,43 @@ class AssignmentsDataLoader:
         # Whether to return pinned-memory CPU tensors for faster H2D copies
         self._pin_memory = bool(pin_memory and torch.cuda.is_available())
 
-        # Load assignments header and records
-        with open(assignments_file, "rb") as f:
-            header = f.read(32)
-            magic, version, rec_size, flags, num_compartments, num_records, seed = (
-                struct.unpack("<8sBBHIQQ", header)
+        # Load assignments header and records.
+        #
+        # assignments_file is None exactly when n_compartments == 1, where the
+        # array is a constant: one category, encoding compartment 0, so every
+        # record is the integer 0. Materialising it cost 8 B/example of RAM PER
+        # RANK for a value the per-batch gather below always decodes to
+        # (kind=0, src=0, dst=0) -- 0.78 GB/rank on a 100B run, 2.34 GB/rank at
+        # the pinned 300B horizon, times 8 ranks. Synthesize it instead.
+        if assignments_file is None:
+            assert n_compartments == 1, (
+                "assignments_file may only be omitted at n_compartments == 1"
             )
-            assert magic == b"TCASSIGN", "assignments magic mismatch"
-            assert version == 1 and rec_size == 8, (
-                "unsupported assignments version/record size"
+            assert constant_records is not None, (
+                "constant_records is required when assignments_file is None"
             )
-            assert num_compartments == max_compartments, (
-                f"assignments num_compartments {num_compartments} != expected {max_compartments}"
-            )
-            self._records = np.frombuffer(f.read(), dtype=np.uint64)
-        self.num_records = int(self._records.shape[0])
+            self._records = None
+            # Behaviourally irrelevant here (the gather is constant), but it keeps
+            # assignment_idx's wrap point -- and therefore the value checkpointed
+            # in state_dict -- identical to the materialised path.
+            self.num_records = int(constant_records)
+            self._zero_words = np.zeros(B, dtype=np.uint64)
+        else:
+            with open(assignments_file, "rb") as f:
+                header = f.read(32)
+                magic, version, rec_size, flags, num_compartments, num_records, seed = (
+                    struct.unpack("<8sBBHIQQ", header)
+                )
+                assert magic == b"TCASSIGN", "assignments magic mismatch"
+                assert version == 1 and rec_size == 8, (
+                    "unsupported assignments version/record size"
+                )
+                assert num_compartments == max_compartments, (
+                    f"assignments num_compartments {num_compartments} != expected {max_compartments}"
+                )
+                self._records = np.frombuffer(f.read(), dtype=np.uint64)
+            self.num_records = int(self._records.shape[0])
+            self._zero_words = None
 
         # Multi-source mode: one _TokenStream or SyntheticTokenStream per compartment
         self._multi_source = compartment_filename_patterns is not None
@@ -568,7 +593,11 @@ class AssignmentsDataLoader:
         rec_indices = (
             self.assignment_idx + self.num_processes * np.arange(B, dtype=np.int64)
         ) % max(1, self.num_records)
-        words = self._records[rec_indices]
+        # _records is None at c=1, where the gather returns 0 for every index.
+        # _zero_words is preallocated at length self.B, which is exactly len(rec_indices).
+        words = (
+            self._zero_words if self._records is None else self._records[rec_indices]
+        )
         w = words.astype(np.uint64, copy=False)
         kinds = (w & np.uint64(0xFF)).astype(np.int64, copy=False)
         srcs = ((w >> np.uint64(16)) & np.uint64(0xFFFF)).astype(np.int64, copy=False)
@@ -1096,6 +1125,14 @@ def main(config: JobConfig) -> None:
             )
         total_examples = _horizon or _needed
 
+        # c=1 needs no assignment array at all. One compartment means exactly one
+        # category (compute_weights_map rejects translation_ratio > 0 at n < 2), so
+        # every record encodes compartment 0 and the whole array is the constant 0.
+        # Nothing consumes it: the loader's per-batch gather is constant, and the
+        # only reader outside training -- experiment/eval_utils.token_counts_at_examples
+        # -- has no callers. Skipping it saves 8 B/example of RAM on every rank.
+        skip_assignments = exp.n_compartments == 1
+
         # Format float safely for filenames
         def _fmt_float(x: float) -> str:
             s = f"{x:.6g}".rstrip("0").rstrip(".")
@@ -1109,9 +1146,12 @@ def main(config: JobConfig) -> None:
             f"maxc{max_compartments_int}_seed{int(base_seed)}"
             + ("" if getattr(exp, "assignment_order", "lcg") == "lcg" else "_hash")
         )
-        # Point assignments_path to cached file
-        assignments_path = os.path.join(
-            cache_root, f"assignments_{assignments_desc}.bin"
+        # Point assignments_path to cached file. None at c=1 -- the loader
+        # synthesizes the constant records rather than reading them.
+        assignments_path = (
+            None
+            if skip_assignments
+            else os.path.join(cache_root, f"assignments_{assignments_desc}.bin")
         )
 
         # If permuting tokens per compartment, also compute cached permutations path
@@ -1139,75 +1179,80 @@ def main(config: JobConfig) -> None:
                 total_examples = int(
                     getattr(config.experiment, "assignment_horizon_examples", 0) or 0
                 ) or (config.training.max_iters * effective_batch_size)
-                # Ensure cache directory exists
-                cache_root = os.path.dirname(assignments_path)
-                os.makedirs(cache_root, exist_ok=True)
-                # Refuse to fill the volume. These files are 8 bytes/record, so a
-                # 1M-step multi-compartment run is 16.4GB -- enough to exhaust a
-                # node-local disk that is shared with other people's data. Fail
-                # loudly BEFORE writing rather than ENOSPC-ing hours in, which
-                # would leave a truncated .tmp and a held lock behind.
-                if not os.path.exists(assignments_path):
-                    need = 32 + int(total_examples) * 8
-                    margin = 20 * 1024**3
-                    free = shutil.disk_usage(cache_root).free
-                    if free < need + margin:
-                        raise SystemExit(
-                            f"refusing to write assignments to {cache_root}: need "
-                            f"{need/1024**3:.1f}GB + {margin/1024**3:.0f}GB margin but only "
-                            f"{free/1024**3:.1f}GB free. Point TC_ASSIGNMENT_CACHE at a "
-                            f"volume with room, or free space here."
-                        )
-                # Assignments: write only if not already cached, with simple cross-process locking
-                if not os.path.exists(assignments_path):
-                    lock_path = assignments_path + ".lock"
-                    tmp_path = assignments_path + f".tmp.{os.getpid()}"
-                    acquired = False
-                    while True:
-                        try:
-                            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-                            os.close(fd)
-                            acquired = True
-                            break
-                        except FileExistsError:
-                            # Another process is writing; wait until file appears
-                            if os.path.exists(assignments_path):
+                # c=1 (skip_assignments) has no array to build: assignments_path
+                # is None and the loader synthesizes the constant records. The
+                # permutation block below still runs -- 10 configs pair c=1 with
+                # permute_tokens_per_compartment and would break without it.
+                if not skip_assignments:
+                    # Ensure cache directory exists
+                    cache_root = os.path.dirname(assignments_path)
+                    os.makedirs(cache_root, exist_ok=True)
+                    # Refuse to fill the volume. These files are 8 bytes/record, so a
+                    # 1M-step multi-compartment run is 16.4GB -- enough to exhaust a
+                    # node-local disk that is shared with other people's data. Fail
+                    # loudly BEFORE writing rather than ENOSPC-ing hours in, which
+                    # would leave a truncated .tmp and a held lock behind.
+                    if not os.path.exists(assignments_path):
+                        need = 32 + int(total_examples) * 8
+                        margin = 20 * 1024**3
+                        free = shutil.disk_usage(cache_root).free
+                        if free < need + margin:
+                            raise SystemExit(
+                                f"refusing to write assignments to {cache_root}: need "
+                                f"{need/1024**3:.1f}GB + {margin/1024**3:.0f}GB margin but only "
+                                f"{free/1024**3:.1f}GB free. Point TC_ASSIGNMENT_CACHE at a "
+                                f"volume with room, or free space here."
+                            )
+                    # Assignments: write only if not already cached, with simple cross-process locking
+                    if not os.path.exists(assignments_path):
+                        lock_path = assignments_path + ".lock"
+                        tmp_path = assignments_path + f".tmp.{os.getpid()}"
+                        acquired = False
+                        while True:
+                            try:
+                                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                                os.close(fd)
+                                acquired = True
                                 break
-                            time.sleep(0.1)
-                    if acquired:
-                        try:
-                            write_assignments(
-                                tmp_path,
-                                weights_map=compute_weights_map(
-                                    n=exp.n_compartments,
-                                    t=max(0.0, float(exp.translation_ratio)),
-                                    scaling=exp.compartment_scaling,
-                                    mode=exp.translation_ratio_mode,
-                                ),
-                                total_examples=total_examples,
-                                max_compartments=max_compartments_int,
-                                seed=base_seed,
-                                order=getattr(config.experiment, "assignment_order", "lcg"),
-                                no_shuffle=False,
-                            )
-                            os.replace(tmp_path, assignments_path)
-                            print0(
-                                f"Wrote assignments to {assignments_path} with total_examples={total_examples:,}"
-                            )
-                        finally:
+                            except FileExistsError:
+                                # Another process is writing; wait until file appears
+                                if os.path.exists(assignments_path):
+                                    break
+                                time.sleep(0.1)
+                        if acquired:
                             try:
-                                if os.path.exists(tmp_path):
-                                    os.remove(tmp_path)
-                            except Exception:
-                                pass
-                            try:
-                                os.remove(lock_path)
-                            except Exception:
-                                pass
+                                write_assignments(
+                                    tmp_path,
+                                    weights_map=compute_weights_map(
+                                        n=exp.n_compartments,
+                                        t=max(0.0, float(exp.translation_ratio)),
+                                        scaling=exp.compartment_scaling,
+                                        mode=exp.translation_ratio_mode,
+                                    ),
+                                    total_examples=total_examples,
+                                    max_compartments=max_compartments_int,
+                                    seed=base_seed,
+                                    order=getattr(config.experiment, "assignment_order", "lcg"),
+                                    no_shuffle=False,
+                                )
+                                os.replace(tmp_path, assignments_path)
+                                print0(
+                                    f"Wrote assignments to {assignments_path} with total_examples={total_examples:,}"
+                                )
+                            finally:
+                                try:
+                                    if os.path.exists(tmp_path):
+                                        os.remove(tmp_path)
+                                except Exception:
+                                    pass
+                                try:
+                                    os.remove(lock_path)
+                                except Exception:
+                                    pass
+                        else:
+                            print0(f"Using cached assignments at {assignments_path}")
                     else:
                         print0(f"Using cached assignments at {assignments_path}")
-                else:
-                    print0(f"Using cached assignments at {assignments_path}")
                 # If enabled, also create deterministic per-compartment permutations of base tokens
                 if exp.permute_tokens_per_compartment:
                     if config.model.vocab_size is None:
@@ -1764,6 +1809,7 @@ def main(config: JobConfig) -> None:
             base_vocab,
             cast(int, exp_cfg.max_compartments),
             exp_cfg.n_compartments,
+            constant_records=total_examples if assignments_path is None else None,
             permute_tokens=exp_cfg.permute_tokens_per_compartment,
             permutations_path=(
                 permutations_path if exp_cfg.permute_tokens_per_compartment else None
@@ -1788,6 +1834,7 @@ def main(config: JobConfig) -> None:
                 base_vocab,
                 cast(int, exp_cfg.max_compartments),
                 exp_cfg.n_compartments,
+                constant_records=total_examples if assignments_path is None else None,
                 permute_tokens=exp_cfg.permute_tokens_per_compartment,
                 permutations_path=(
                     permutations_path
