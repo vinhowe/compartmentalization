@@ -844,8 +844,72 @@ if not os.path.isdir(STORAGE_ROOT):
 ROLLING_CHECKPOINT_INTERVAL = 1000
 
 
+DATALOADER_STATE = "dataloader.pt"          # pre-2026-08-15 layout: rank 0 only
+
+
+def _dl_state_name(rank: int) -> str:
+    return f"dataloader_rank{int(rank)}.pt"
+
+
+def save_dataloader_state(ckpt_dir, train_loader, val_loader, rank: int) -> None:
+    """Write THIS rank's dataloader state. Called by every rank, not just master.
+
+    Every rank must persist its own position. Before 2026-08-15 only rank 0's
+    state was written and every rank restored it, so after any resume all ranks
+    replayed rank 0's stream: distinct sequences per optimizer step fell from
+    2048 to 256 while the LR stayed tuned for 2048. It is silent -- training
+    continues and the loss curve stays plausible.
+
+    Rank 0's state cannot be used to reconstruct rank r's, either. Ranks advance
+    in lockstep ONLY at translation_ratio=0; once tr>0 a translation example
+    consumes T/2 tokens instead of T, and which examples are translations is a
+    per-rank property of the assignments, so the streams drift apart by a
+    data-dependent amount. Hence one file per rank rather than an offset.
+    """
+    os.makedirs(ckpt_dir, exist_ok=True)
+    state = {"train": train_loader.state_dict(), "rank": int(rank)}
+    if val_loader is not None:
+        state["val"] = val_loader.state_dict()
+    torch.save(state, os.path.join(ckpt_dir, _dl_state_name(rank)))
+
+
+def load_dataloader_state(ckpt_dir, rank: int):
+    """This rank's saved state, or None.
+
+    Falls back to the pre-fix single-file layout, which only ever holds rank 0's
+    position. Resuming every rank from it is what the fix exists to prevent, so
+    this refuses rather than silently reproducing the bug; set
+    TC_ALLOW_RANK0_DATALOADER_RESUME=1 to accept it for a run whose checkpoints
+    predate the fix and whose remaining budget makes a restart worse.
+    """
+    per_rank = os.path.join(ckpt_dir, _dl_state_name(rank))
+    if os.path.exists(per_rank):
+        return torch.load(per_rank, map_location="cpu", weights_only=False)
+
+    legacy = os.path.join(ckpt_dir, DATALOADER_STATE)
+    if not os.path.exists(legacy):
+        return None
+    if os.environ.get("TC_ALLOW_RANK0_DATALOADER_RESUME") == "1":
+        print0(
+            f"WARNING: {ckpt_dir} predates per-rank dataloader state; every rank "
+            f"will resume from rank 0's position and train on IDENTICAL data "
+            f"(TC_ALLOW_RANK0_DATALOADER_RESUME=1)."
+        )
+        return torch.load(legacy, map_location="cpu", weights_only=False)
+    raise RuntimeError(
+        f"{ckpt_dir} has only {DATALOADER_STATE} (rank 0's position). Resuming "
+        f"every rank from it makes all ranks train on identical data -- the bug "
+        f"fixed on 2026-08-15. Options:\n"
+        f"  - restart this run from a checkpoint written after the fix\n"
+        f"  - TC_ALLOW_RANK0_DATALOADER_RESUME=1 to accept the duplication\n"
+        f"  - delete {legacy} to resume with fresh per-rank stream positions "
+        f"(model and optimizer state are kept; only data position resets)"
+    )
+
+
 def _save_rolling_checkpoint(out_dir, raw_model, optimizer, train_loader,
-                             val_loader, iter_num, best_val_loss):
+                             val_loader, iter_num, best_val_loss,
+                             rank: int = 0, master: bool = True):
     """Save a rolling 'latest' checkpoint for preemption resilience.
 
     Overwrites a single _rolling/ directory each time. trainer_state.json is
@@ -854,12 +918,12 @@ def _save_rolling_checkpoint(out_dir, raw_model, optimizer, train_loader,
     ck_root = os.path.join(out_dir, "checkpoints")
     rolling_dir = os.path.join(ck_root, "_rolling")
     os.makedirs(rolling_dir, exist_ok=True)
+    # EVERY rank records its own stream position; only master writes the weights.
+    save_dataloader_state(rolling_dir, train_loader, val_loader, rank)
+    if not master:
+        return
     torch.save(raw_model.state_dict(), os.path.join(rolling_dir, "model.pt"))
     torch.save(optimizer.state_dict(), os.path.join(rolling_dir, "optimizer.pt"))
-    dl_state = {"train": train_loader.state_dict()}
-    if val_loader is not None:
-        dl_state["val"] = val_loader.state_dict()
-    torch.save(dl_state, os.path.join(rolling_dir, "dataloader.pt"))
     # Write trainer_state.json LAST — its existence signals a complete checkpoint
     with open(os.path.join(rolling_dir, "trainer_state.json"), "w") as f:
         json.dump({"iter_num": iter_num, "best_val_loss": float(best_val_loss)}, f)
@@ -1552,9 +1616,8 @@ def main(config: JobConfig) -> None:
                 # as "corrupt rolling checkpoint" and silently resumes from the last
                 # NAMED checkpoint instead, which for these runs is 262k steps stale.
                 # The file is one we wrote ourselves, so unpickling it is safe.
-                dl_ckpt = os.path.join(ckpt_dir, "dataloader.pt")
-                if os.path.exists(dl_ckpt):
-                    dataloader_state = torch.load(dl_ckpt, map_location="cpu", weights_only=False)
+                # This RANK's state, not rank 0's. See load_dataloader_state.
+                dataloader_state = load_dataloader_state(ckpt_dir, ddp_rank or 0)
             except Exception as e:
                 if "_rolling" in str(ckpt_dir):
                     # Refuse to SILENTLY rewind. This fallback previously turned an
@@ -1598,9 +1661,9 @@ def main(config: JobConfig) -> None:
                             opt_ckpt = os.path.join(ckpt_dir, "optimizer.pt")
                             if os.path.exists(opt_ckpt):
                                 checkpoint["optimizer"] = torch.load(opt_ckpt, map_location="cpu")
-                            dl_ckpt = os.path.join(ckpt_dir, "dataloader.pt")
-                            if os.path.exists(dl_ckpt):
-                                dataloader_state = torch.load(dl_ckpt, map_location="cpu")
+                            dataloader_state = load_dataloader_state(
+                                ckpt_dir, ddp_rank or 0
+                            )
                 else:
                     raise
     if checkpoint is not None:
@@ -2212,11 +2275,21 @@ def main(config: JobConfig) -> None:
     while iter_num < max_iters:
         # Check for preemption signal (GPU rescheduling)
         if _preempt_requested.is_set():
+            # Every rank writes its own dataloader position; only master writes
+            # the weights. A preempt that saved rank 0's position alone would
+            # make the requeued job train all ranks on identical data.
+            if not master_process:
+                _save_rolling_checkpoint(
+                    out_dir, raw_model, optimizer, train_loader,
+                    val_loader, iter_num, best_val_loss,
+                    rank=ddp_rank or 0, master=False,
+                )
             if master_process:
                 print(f"[preempt] SIGUSR1 received at iter {iter_num} — saving checkpoint and exiting")
                 _save_rolling_checkpoint(
                     out_dir, raw_model, optimizer, train_loader,
                     val_loader, iter_num, best_val_loss,
+                    rank=ddp_rank or 0, master=True,
                 )
                 if wandb_log and wandb_buffer_enabled:
                     wandb_flush_buffer()
@@ -2258,6 +2331,22 @@ def main(config: JobConfig) -> None:
                 best_val_loss = losses["val"]
 
         # Save checkpoints only at log-spaced steps
+        # Every rank persists its OWN stream position at exactly the iterations
+        # that produce a resumable checkpoint; the master-only block below writes
+        # weights and optimizer state. Conditions here are rank-uniform, so this
+        # needs no collective -- deliberately, since the preempt path above is
+        # not provably rank-uniform and a collective there would deadlock.
+        if (
+            not master_process
+            and iter_num in checkpoint_steps
+            and iter_num > 0
+            and iter_num in full_state_iters
+        ):
+            save_dataloader_state(
+                _checkpoint_dir(os.path.join(out_dir, "checkpoints"), iter_num),
+                train_loader, val_loader, ddp_rank or 0,
+            )
+
         if (
             master_process
             and iter_num in checkpoint_steps
@@ -2290,10 +2379,7 @@ def main(config: JobConfig) -> None:
                 # fp32 optimizer state, deliberately not downcast: this exists to
                 # be resumed from, and bf16 moments would perturb the trajectory.
                 torch.save(optimizer.state_dict(), os.path.join(step_dir, "optimizer.pt"))
-                dl_state = {"train": train_loader.state_dict()}
-                if val_loader is not None:
-                    dl_state["val"] = val_loader.state_dict()
-                torch.save(dl_state, os.path.join(step_dir, "dataloader.pt"))
+                save_dataloader_state(step_dir, train_loader, val_loader, ddp_rank or 0)
             # trainer_state.json LAST — its presence is what marks the checkpoint
             # complete, so it must not appear before optimizer.pt.
             with open(os.path.join(step_dir, "trainer_state.json"), "w") as f:
@@ -2338,9 +2424,10 @@ def main(config: JobConfig) -> None:
 
         # Rolling "latest" checkpoint for preemption resilience.
         # Skip if a named checkpoint was already saved this step.
+        # NOT gated on master_process: every rank must record its own stream
+        # position. _save_rolling_checkpoint writes weights only for master.
         if (
-            master_process
-            and ROLLING_CHECKPOINT_INTERVAL > 0
+            ROLLING_CHECKPOINT_INTERVAL > 0
             and iter_num > 0
             and iter_num % ROLLING_CHECKPOINT_INTERVAL == 0
             and iter_num not in checkpoint_steps
@@ -2348,6 +2435,7 @@ def main(config: JobConfig) -> None:
             _save_rolling_checkpoint(
                 out_dir, raw_model, optimizer, train_loader,
                 val_loader, iter_num, best_val_loss,
+                rank=ddp_rank or 0, master=master_process,
             )
 
         if iter_num == 0 and eval_only:
@@ -2927,6 +3015,17 @@ def main(config: JobConfig) -> None:
     # Deliberately duplicated rather than factored out of the in-loop block: this
     # is additive, so a mistake here cannot regress the path every existing run
     # depends on.
+    if (
+        not master_process
+        and iter_num in checkpoint_steps
+        and iter_num > 0
+        and iter_num in full_state_iters
+    ):
+        save_dataloader_state(
+            _checkpoint_dir(os.path.join(out_dir, "checkpoints"), iter_num),
+            train_loader, val_loader, ddp_rank or 0,
+        )
+
     if master_process and iter_num in checkpoint_steps and iter_num > 0:
         ck_root = os.path.join(out_dir, "checkpoints")
         step_dir = _checkpoint_dir(ck_root, iter_num)
@@ -2949,10 +3048,7 @@ def main(config: JobConfig) -> None:
                 torch.save(raw_dann.state_dict(), os.path.join(step_dir, "dann_discriminators.pt"))
             if save_full_state:
                 torch.save(optimizer.state_dict(), os.path.join(step_dir, "optimizer.pt"))
-                dl_state = {"train": train_loader.state_dict()}
-                if val_loader is not None:
-                    dl_state["val"] = val_loader.state_dict()
-                torch.save(dl_state, os.path.join(step_dir, "dataloader.pt"))
+                save_dataloader_state(step_dir, train_loader, val_loader, ddp_rank or 0)
             with open(os.path.join(step_dir, "trainer_state.json"), "w") as f:
                 json.dump(
                     {
