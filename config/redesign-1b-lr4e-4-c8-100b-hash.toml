@@ -1,0 +1,129 @@
+# c=8 at 100B, RESTARTED FROM ZERO with assignment_order="hash".
+#
+# This is not an extension of redesign-1b-lr4e-4-c8. That run, and every other
+# c=8 arm, used the legacy LCG ordering at assignment_seed=1024 -- the exact
+# configuration shown to train 0.28 nats worse (figures/diag_c8_assignment_order.png).
+# Its trunk is contaminated, so there is nothing to resume: the run starts at 0.
+# Under "hash" the first 30B IS a prefix of this stream, so the 30B comparison
+# point is recovered along the way rather than needing a separate run.
+#
+# ~24.4h at c=8, over the 1440-min QOS ceiling -- submit as a chained pair
+# (second job --dependency=afterany, resuming from _rolling).
+#
+# Generated from redesign-1b-base.toml.
+# 1B base recipe for the NeurIPS resubmission. Not yet run.
+#
+# Every value here is a deliberate change from the old recipe; see
+# paper/reviews/neurips_redesign_plan.md for the reasoning. The short version:
+#
+#   context 64 -> 1024      30% of HellaSwag and 3% of LAMBADA did not fit the
+#                           old window; the AC called the setup artificial.
+#   model 24-1024 -> 16-2048  the old "1B" was 335M. This is 872M at c=1 and
+#                           1342M at c=8, matching Pythia-1B / OLMo-1B geometry.
+#   batch in TOKENS         2048 seq x 1024 = 2.097M tok/step, inside the 1-4M
+#                           band used by GPT-3 1.3B, Pythia-1B and OLMo-1B.
+#   budget in TOKENS        max_iters is DERIVED. 30B / 2.097M = 14,305.
+#   schedule WSD            the stable phase is extendable; decays fork off it.
+#   warmup ABSOLUTE         300 steps everywhere, never a fraction of the budget
+#                           -- a budget-relative warmup would make the shared
+#                           trunk unshareable, which is cosine's defect.
+#   data                    non-deduplicated FineWeb with a manifest.
+#
+# learning_rate is a PLACEHOLDER pending the sweep. Do not run this as-is for
+# science.
+
+[data]
+train_bin = "data/fineweb350B-bpe16384-nodedup/fineweb350b-nodedup_train_*.bin"
+val_bin   = "data/fineweb350B-bpe16384-nodedup/fineweb350b-nodedup_val_*.bin"
+
+[model]
+# Pythia-1B / OLMo-1B / Llama-3.2-1B all use 16 layers at d_model 2048.
+# d_head 64 -> n_head 32. At T=1024 attention is ~8% of FLOPs here versus ~40%
+# at d=1024, so the larger model is also the better-proportioned one.
+n_layer = 16
+n_head = 32
+n_embd = 2048
+block_size = 1024
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+# EXTENSION to 100B. 100e9 / 2,097,152 = 47,684. Resumes the 30B run's
+# terminal full-state checkpoint; the WSD stable phase has no horizon
+# baked in, so the LR schedule is unchanged by extending.
+max_iters = 47684
+# 2048 sequences per optimizer step, independent of world size: train.py
+# asserts grad_accum % world_size == 0 and then divides, so this is 8 per rank
+# on 8 GPUs. Micro-batch 32 measured at 110 GB peak for c=8 on a 180GB B200.
+batch_size = 32
+gradient_accumulation_steps = 64
+# MUST be false. Presets would otherwise silently retune batch/grad_accum for
+# VRAM and change tokens-per-optimizer-step out from under an exact budget.
+auto_batch_config = false
+eval_interval = 500
+eval_iters = 20
+log_interval = 10
+always_save_checkpoint = true
+seed = 1024
+checkpoint_naming = "tokens"
+# Points that also carry optimizer + dataloader state, i.e. the ones a decay can
+# be forked from later. The end of the run is always included automatically.
+# 27B is the branch point for a 30B anneal; a not-taken branch point cannot be
+# reconstructed, and optimizer state is the part that cannot be recovered.
+full_state_at_tokens = [27_000_000_000, 90_000_000_000]
+
+[optimizer]
+# SETTLED by the sweep, not a placeholder: 4e-4 was optimal at BOTH c=1 and c=8
+# on the 2x-spaced grid, and the ordering held from 30B to 100B. wd=0 beat
+# wd=0.1 by 0.019-0.024 nats, so decoupled decay stays off.
+learning_rate = 4e-4
+weight_decay = 0
+
+[lr]
+schedule = "wsd"
+# Absolute, never a fraction of the budget: 300 steps = 0.63B tokens = 2.1% of a
+# 30B run and 0.21% of a 300B run. Both inside the published band (GPT-3 ~0.1%,
+# Pythia 1%) from one fixed constant, which is what lets 30B/100B/300B share a
+# single trunk.
+warmup_iters = 300
+# Pure stable run: no decay window. Anneals are forked with
+# scripts/launch_anneal.py, which sets decay_start/end on the child.
+decay_start_iter = 0
+decay_end_iter = 0
+# A tenth of peak. Inherited configs carry nanoGPT's default 6e-5, which is
+# ABOVE our peak and would turn the decay into a 3x ramp up; train.py now
+# rejects that at startup.
+min_lr = 4.0e-05
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "redesign-1b-lr4e-4-c8-100b-hash"
+wandb_group = "redesign-1b-lrsweep"
+
+[experiment]
+n_compartments = 8
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+assignment_seed = 1024
+# Pinned to the 300B horizon so 30B / 100B / 300B share ONE assignment array.
+# Deriving it from max_iters (the default) re-randomises every example's
+# compartment when a run is extended -- that invalidated the first c=8 100B
+# attempt. c=1 is immune; this matters only for c>1.
+assignment_horizon_examples = 292968448
+# Explicit even though it is now the default: this field is the thing under test,
+# and a reader must not have to know the default to know what this run did.
+assignment_order = "hash"
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = true
+translation_mode = "standard"
+translation_chunk_size = 4

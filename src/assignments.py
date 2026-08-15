@@ -93,6 +93,57 @@ def _choose_lcg_params(total: int, seed: int) -> tuple[int, int]:
     return a, b
 
 
+_MASK = (1 << 64) - 1
+
+
+def _splitmix64(x: np.ndarray) -> np.ndarray:
+    """Deterministic 64-bit mixer. numpy uint64 wraps, which is what we want."""
+    z = (x + np.uint64(0x9E3779B97F4A7C15))
+    z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return z ^ (z >> np.uint64(31))
+
+
+def _write_records_streaming_hash(
+    f, encoded_values: np.ndarray, cumulative_counts: np.ndarray, total: int, seed: int
+) -> None:
+    """Assign each index independently via a hash, instead of an LCG permutation.
+
+    WHY THIS EXISTS. The LCG path computes j = (a*i + b) % N, which is a Weyl
+    sequence: equidistributed (so every balance check passes) but deliberately
+    LOW-DISCREPANCY, i.e. consecutive terms are correlated by construction and
+    the sequence can have a short period -- 7, 19 and 38 were observed for three
+    seeds at the same N. Worse, `a` is drawn from N, so changing the array length
+    reshuffles everything, which is what broke extending a run.
+
+    Hashing the index instead gives assignments that are independent across i,
+    have no period, and -- crucially -- do not depend on the array length, so any
+    prefix is stable and a run can be extended without re-randomising.
+
+    Trade-off: counts are binomial rather than exact (~0.13% at 4M records)
+    instead of largest-remainder exact.
+    """
+    block = 2_000_000
+    written = 0
+    s = np.uint64(int(seed) & _MASK)
+    # category boundaries as FRACTIONS of the whole, so they do not depend on N
+    cum_frac = np.asarray(cumulative_counts, dtype=np.float64) / float(total)
+    with tqdm(total=total, desc="Writing assignment records (hash)", unit="rec") as pbar:
+        while written < total:
+            m = min(block, total - written)
+            i = np.arange(written, written + m, dtype=np.uint64)
+            # Map to [0,1) and cut on cumulative WEIGHT, never on `% total`.
+            # Using the modulus would make the category a function of the array
+            # length again -- the exact defect this path exists to remove.
+            u = (_splitmix64(i ^ s) >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+            idx = np.searchsorted(cum_frac, u, side="right")
+            out = np.empty(m, dtype=np.uint64)
+            np.take(encoded_values, idx, out=out)
+            out.tofile(f)
+            written += m
+            pbar.update(m)
+
+
 def _prepare_allocation_arrays(
     allocations: List[tuple[Category, int]],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
@@ -164,7 +215,9 @@ def write_assignments(
     max_compartments: int,
     seed: int = 0,
     no_shuffle: bool = False,
+    order: str = "lcg",
 ) -> None:
+    """order: "lcg" (default, legacy) | "hash" (independent per-index assignment)."""
     # Build weight entries
     weights: list[tuple[Category, float]] = []
     for key, w in sorted(weights_map.items()):
@@ -225,9 +278,23 @@ def write_assignments(
     with open(output_path, "wb") as f:
         f.write(header)
         if total_records > 0:
-            if no_shuffle or total_records == 1:
+            single_category = len(encoded_values) == 1
+            if single_category and int(encoded_values[0]) == 0:
+                # DEGENERATE CASE, WORTH SPECIAL-CASING. compartment_scaling="single"
+                # sends every example to compartment 0, so there is exactly one
+                # category, and Category("C", 0, 0) encodes to the integer 0 — the
+                # entire payload is zeros. Streaming it costs 16.4 GB of writes for a
+                # 1M-step run (2.048e9 records x 8 B); over a contended NFS mount that
+                # measured ~3.3 HOURS to materialise a constant. A sparse file is
+                # byte-identical content: truncate is metadata-only and reads of the
+                # hole return zeros. Milliseconds instead of hours.
+                f.truncate(HEADER_SIZE + total_records * RECORD_SIZE)
+            elif no_shuffle or total_records == 1 or single_category:
+                # A single category means the LCG permutation is shuffling identical
+                # values, which is a no-op. Take the cheap ordered path.
                 _write_records_in_order(f, encoded_values, counts)
             else:
-                _write_records_streaming_lcg(
+                (_write_records_streaming_hash if order == "hash"
+                 else _write_records_streaming_lcg)(
                     f, encoded_values, cumulative_counts, total_records, seed
                 )

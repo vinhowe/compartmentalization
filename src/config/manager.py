@@ -2,7 +2,7 @@
 import os
 import sys
 from dataclasses import fields, is_dataclass
-from typing import Any
+from typing import Any, get_origin
 
 import tyro
 
@@ -102,6 +102,25 @@ class ConfigManager:
         if not is_dataclass(cls):
             return data
 
+        # An unknown key here used to be silently dropped, so a typo like
+        # `train_bin_pattern` for `train_bin` left the field at its default and
+        # the run proceeded with the wrong data. For scientific configs that is
+        # the worst failure mode available: no error, plausible output.
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(set(data) - known)
+        if unknown:
+            # Warn rather than raise: 115 of 226 existing configs carry
+            # `always_save_checkpoints` (typo'd plural), harmless only because
+            # the real field defaults to True. Failing them would break the
+            # archive to fix a typo. New configs should be read for this
+            # warning before they are trusted.
+            print(
+                f"WARNING: ignoring unknown key(s) in [{cls.__name__.lower()}]: "
+                f"{', '.join(unknown)} -- these fields keep their DEFAULTS. "
+                f"Did you mean one of: {', '.join(sorted(known))}?",
+                file=sys.stderr,
+            )
+
         result = {}
         for f in fields(cls):
             if f.name in data:
@@ -109,9 +128,28 @@ class ConfigManager:
                 if is_dataclass(f.type) and isinstance(value, dict):
                     result[f.name] = self._dict_to_dataclass(f.type, value)
                 else:
-                    result[f.name] = value
+                    result[f.name] = self._coerce(f.type, value)
 
         return cls(**result)  # pyright: ignore
+
+    @staticmethod
+    def _coerce(field_type, value):
+        """Make TOML arrays match tuple-typed fields.
+
+        TOML has one sequence type and tomllib always yields `list`. A field
+        annotated `tuple[int, ...]` therefore receives a list, and while the
+        frozen dataclass accepts it happily, tyro later fails rendering the CLI
+        default with "could not match default value [...] with any types in
+        union [tuple[int, ...], list]". That surfaces only on the CLI path, so a
+        config that loads fine via load_from_toml_file still kills train.py.
+
+        Tuples are also the right runtime type here: these dataclasses are
+        frozen and a list field would silently make them unhashable.
+        """
+        origin = get_origin(field_type)
+        if origin is tuple and isinstance(value, list):
+            return tuple(value)
+        return value
 
     def _validate_config(self) -> None:
         """Validate the parsed configuration."""

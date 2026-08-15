@@ -255,6 +255,23 @@ class GPT(nn.Module):
             self.comp_emb = None
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # ICL dual-stream head + embedding. When enabled, a parallel
+        # per-example hashed view of the input is summed with tok_emb at
+        # the input stage, and a second lm head produces logits over the
+        # icl_vocab_size at the output. Both are no-ops when icl_enabled=False.
+        self.icl_enabled: bool = bool(getattr(config, "icl_enabled", False))
+        self.icl_vocab_size: int = int(getattr(config, "icl_vocab_size", 0))
+        if self.icl_enabled:
+            assert self.icl_vocab_size > 0, "icl_vocab_size must be set when icl_enabled"
+            self.wte_icl = nn.Embedding(self.icl_vocab_size, config.n_embd)
+            self.lm_head_icl = nn.Linear(
+                config.n_embd, self.icl_vocab_size, bias=False
+            )
+        else:
+            self.wte_icl = None
+            self.lm_head_icl = None
+
         if config.weight_tying:
             # with weight tying when using torch.compile() some warnings get generated:
             # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -363,6 +380,10 @@ class GPT(nn.Module):
         compartment_ids: Optional[torch.Tensor] = None,
         full_sequence_logits: bool = False,
         capture_layer: Optional[int] = None,
+        icl_idx: Optional[torch.Tensor] = None,
+        icl_targets: Optional[torch.Tensor] = None,
+        icl_mask: Optional[torch.Tensor] = None,
+        return_last_hidden: bool = False,
     ):
         """Forward.
 
@@ -374,6 +395,12 @@ class GPT(nn.Module):
         `capture_layer` (0-indexed), shape (B, T, n_embd). The caller is
         responsible for pooling / loss. We short-circuit the LM head when
         capture_layer is set, so only the trunk through that layer runs.
+
+        With ICL dual-stream enabled (icl_enabled=True at init) and icl_idx
+        provided: an additional E_icl[icl_idx] is summed into the input
+        embedding. If icl_targets is also provided, returns
+        (logits, loss, icl_logits, icl_loss) where loss is the canonical
+        next-token loss and icl_loss is the next-ICL-token loss.
         """
         device = idx.device
         b, t = idx.size()
@@ -400,6 +427,21 @@ class GPT(nn.Module):
         else:
             tok_emb = cast(nn.Embedding, self.transformer.wte)(idx)
 
+        # ICL dual-stream with per-position masking: replace canonical
+        # embedding with ICL embedding at masked positions (before pos/comp
+        # encodings get added). Mask=True → use icl_emb; Mask=False → keep
+        # canonical. This is the "stream dropout" variant that forces both
+        # tasks to share residual-stream pathways. When icl_mask is None,
+        # we fall through to the default summed dual-stream behavior below.
+        if (
+            self.icl_enabled
+            and icl_idx is not None
+            and icl_mask is not None
+        ):
+            icl_emb_for_mask = cast(nn.Embedding, self.wte_icl)(icl_idx)
+            m = icl_mask.unsqueeze(-1).to(tok_emb.dtype)
+            tok_emb = m * icl_emb_for_mask + (1.0 - m) * tok_emb
+
         # Position encoding: either learned embeddings or RoPE
         if self.use_rope:
             # RoPE: no positional embedding added to input, applied in attention
@@ -418,6 +460,12 @@ class GPT(nn.Module):
             # compartment_ids shape (b, t)
             comp_emb = cast(nn.Embedding, self.comp_emb)(compartment_ids)
             x_input = x_input + comp_emb
+        # ICL dual-stream: add the per-example hashed-view embedding.
+        # Skip when masking was already applied above — masked variant
+        # REPLACES rather than sums.
+        if self.icl_enabled and icl_idx is not None and icl_mask is None:
+            icl_emb = cast(nn.Embedding, self.wte_icl)(icl_idx)
+            x_input = x_input + icl_emb
         x = cast(nn.Dropout, self.transformer.drop)(x_input)
         layer_outputs: dict[int, torch.Tensor] = {}
         for i, block in enumerate(cast(nn.ModuleList, self.transformer.h)):
@@ -445,8 +493,28 @@ class GPT(nn.Module):
         else:
             loss = None
 
+        # ICL head: produce parallel logits over the ICL vocab and compute the
+        # ICL next-token loss when targets are provided.
+        icl_logits = None
+        icl_loss = None
+        if self.icl_enabled:
+            if targets is not None or full_sequence_logits:
+                icl_logits = cast(nn.Linear, self.lm_head_icl)(x)
+            else:
+                icl_logits = cast(nn.Linear, self.lm_head_icl)(x[:, [-1], :])
+            if icl_targets is not None:
+                icl_loss = F.cross_entropy(
+                    icl_logits.view(-1, icl_logits.size(-1)),
+                    icl_targets.view(-1),
+                    ignore_index=-1,
+                )
+
         if self._dann_collect_layers is not None:
             return logits, loss, layer_outputs
+        if self.icl_enabled:
+            return logits, loss, icl_logits, icl_loss
+        if return_last_hidden:
+            return logits, loss, x
         return logits, loss
 
     def crop_block_size(self, block_size):
@@ -568,8 +636,35 @@ class GPT(nn.Module):
 
         return optimizer
 
+    # Dense bf16 peak FLOPS, no sparsity, matched against torch's device name.
+    # Order matters: "A100" must be tested before the bare fallback, and the
+    # more specific SKU strings before their families.
+    _BF16_PEAK_FLOPS = (
+        ("B200", 2.25e15),
+        ("B100", 1.8e15),
+        ("H200", 989e12),
+        ("H100", 989e12),
+        ("A100", 312e12),
+        ("L40", 181e12),
+        ("A6000", 155e12),
+        ("V100", 125e12),   # fp16 tensor cores; V100 has no bf16 path at all
+    )
+
+    @classmethod
+    def _peak_flops(cls, device_name):
+        for key, peak in cls._BF16_PEAK_FLOPS:
+            if key in device_name:
+                return peak, key
+        return None, None
+
     def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
+        """Estimate model flops utilization against the *current* device's peak.
+
+        This used to divide by a hardcoded 312e12 (A100) regardless of what it
+        ran on, so every MFU figure read off a B200 was inflated ~7x and every
+        H100 figure ~3x. Since MFU is the number we tune throughput against,
+        that made cross-hardware comparisons actively misleading.
+        """
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
@@ -578,11 +673,27 @@ class GPT(nn.Module):
         flops_per_token = 6 * N + 12 * L * H * Q * T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        # express our flops throughput as ratio of A100 bfloat16 peak flops
         flops_achieved = flops_per_iter * (1.0 / dt)  # per second
-        flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        mfu = flops_achieved / flops_promised
-        return mfu
+
+        name = ""
+        if torch.cuda.is_available():
+            try:
+                name = torch.cuda.get_device_name()
+            except Exception:
+                name = ""
+        flops_promised, matched = self._peak_flops(name)
+        if flops_promised is None:
+            # An unrecognised device would silently get A100 numbers, which is
+            # exactly the bug this replaced. Report NaN so a bad MFU reading is
+            # visible in the logs instead of plausible.
+            if not getattr(type(self), "_warned_unknown_gpu", False):
+                type(self)._warned_unknown_gpu = True
+                print(
+                    f"[mfu] unknown device {name!r}: no bf16 peak on record, "
+                    f"reporting MFU as nan. Add it to GPT._BF16_PEAK_FLOPS."
+                )
+            return float("nan")
+        return flops_achieved / flops_promised
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
