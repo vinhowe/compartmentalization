@@ -226,20 +226,78 @@ class DistributedDataLoader:
         return x, y
 
 
-class _TokenStream:
-    """Sequential token reader over a set of .bin shards."""
+# Granularity of the within-shard shuffle, in tokens. Larger than the 1024-token
+# context so a shuffled block still holds a full window of contiguous text.
+SHUFFLE_BLOCK = 8192
 
-    def __init__(self, filename_pattern: str, process_rank: int, T: int):
+
+def _mix_seed(seed: int, salt: int) -> int:
+    """Stable 64-bit mix. Same inputs -> same stream in every process."""
+    z = (int(seed) * 0x9E3779B97F4A7C15 + int(salt)) & 0xFFFFFFFFFFFFFFFF
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+    return (z ^ (z >> 31)) & 0xFFFFFFFFFFFFFFFF
+
+
+class _TokenStream:
+    """Token reader over a set of .bin shards, optionally shuffled."""
+
+    def __init__(self, filename_pattern: str, process_rank: int, T: int,
+                 shuffle_seed: Optional[int] = None):
         self.files = sorted(glob.glob(filename_pattern))
         assert len(self.files) > 0, (
             f"did not find any files that match the pattern {filename_pattern}"
         )
+        # DATA ORDER. Without a shuffle_seed this reads shards in sorted order and
+        # each shard front-to-back -- inherited from llm.c, which consumes its
+        # whole (small) corpus so order is irrelevant there. Against FineWeb
+        # sample-350BT it is not: files 0-29 are ALL CC-MAIN-2013-20, and a 30B
+        # run reads only the first ~39 of 510 files, so ~77% of it is one 2013
+        # crawl. A 100B run is ~23% that crawl. Different budgets therefore see
+        # different data distributions, and the seed changes nothing about the
+        # data at all.
+        #
+        # With a shuffle_seed, order is permuted at two levels: which shard comes
+        # next, and which block within a shard. Both are pure functions of the
+        # seed, so every rank derives the SAME order and a resume reproduces it
+        # without storing a permutation. Rank disjointness still comes from the
+        # process_rank stride below, exactly as before -- deliberately, so the
+        # union of what the ranks read does not depend on world_size.
+        self.shuffle_seed = shuffle_seed
+        if shuffle_seed is None:
+            self.file_order = np.arange(len(self.files))
+        else:
+            self.file_order = np.random.default_rng(
+                _mix_seed(shuffle_seed, 0x5EED_F11E)
+            ).permutation(len(self.files))
         self.current_shard = 0
-        self.tokens = _load_data_shard(self.files[0])
+        self.tokens = self._load_ordered(0)
         if len(self.tokens) > (T + 2):
             self.token_pos = (process_rank * T) % (len(self.tokens) - (T + 2))
         else:
             self.token_pos = 0
+
+    def _load_ordered(self, ordinal: int) -> np.ndarray:
+        """Shard at position `ordinal` of the permuted file order, blocks shuffled.
+
+        Permuting whole blocks rather than individual tokens keeps each block a
+        contiguous run of real text; only the order blocks appear in changes.
+        The tail that does not fill a block is left in place rather than dropped,
+        so no tokens are lost.
+        """
+        tokens = _load_data_shard(self.files[self.file_order[ordinal]])
+        if self.shuffle_seed is None:
+            return tokens
+        n_full = len(tokens) // SHUFFLE_BLOCK
+        if n_full < 2:
+            return tokens
+        rng = np.random.default_rng(
+            _mix_seed(self.shuffle_seed, int(self.file_order[ordinal]))
+        )
+        head = tokens[: n_full * SHUFFLE_BLOCK].reshape(n_full, SHUFFLE_BLOCK)
+        out = head[rng.permutation(n_full)].reshape(-1)
+        tail = tokens[n_full * SHUFFLE_BLOCK :]
+        return np.concatenate([out, tail]) if len(tail) else out
 
     def read_tokens(self, n: int) -> np.ndarray:
         out = np.empty(n, dtype=np.int32)
@@ -262,13 +320,13 @@ class _TokenStream:
     def advance(self) -> None:
         self.current_shard = (self.current_shard + 1) % len(self.files)
         self.token_pos = 0
-        self.tokens = _load_data_shard(self.files[self.current_shard])
+        self.tokens = self._load_ordered(self.current_shard)
 
     def load_shard(self, idx: int) -> None:
         new_idx = idx % len(self.files)
         if new_idx != self.current_shard:
             self.current_shard = new_idx
-            self.tokens = _load_data_shard(self.files[self.current_shard])
+            self.tokens = self._load_ordered(self.current_shard)
         self.token_pos = 0
 
     def state_dict(self) -> dict:
@@ -374,6 +432,11 @@ class AssignmentsDataLoader:
         # Record count to assume when assignments_file is None (c=1). Only sets
         # the wrap point for assignment_idx; the records themselves are constant.
         constant_records: Optional[int] = None,
+        # Seed for corpus read order; None reads shards and blocks in file order.
+        # Identical on every rank on purpose -- rank disjointness comes from the
+        # process_rank stride, so the union of what the ranks read does not
+        # depend on world_size.
+        shuffle_seed: Optional[int] = None,
         permute_tokens: bool = False,
         permutations_path: Optional[str] = None,
         permute_inputs: bool = True,
@@ -481,10 +544,14 @@ class AssignmentsDataLoader:
                         frequencies=synthetic_frequencies,
                     ))
                 else:
-                    self._streams.append(_TokenStream(pat, process_rank, T))
+                    self._streams.append(
+                        _TokenStream(pat, process_rank, T, shuffle_seed=shuffle_seed)
+                    )
             self._stream: Optional[_TokenStream] = None
         else:
-            self._stream = _TokenStream(filename_pattern, process_rank, T)
+            self._stream = _TokenStream(
+                filename_pattern, process_rank, T, shuffle_seed=shuffle_seed
+            )
             self._streams: Optional[list[_TokenStream]] = None
 
         # assignment index start (strided by world size)
@@ -1873,6 +1940,7 @@ def main(config: JobConfig) -> None:
             cast(int, exp_cfg.max_compartments),
             exp_cfg.n_compartments,
             constant_records=total_examples if assignments_path is None else None,
+            shuffle_seed=(base_seed if config.data.shuffle else None),
             permute_tokens=exp_cfg.permute_tokens_per_compartment,
             permutations_path=(
                 permutations_path if exp_cfg.permute_tokens_per_compartment else None
@@ -1898,6 +1966,7 @@ def main(config: JobConfig) -> None:
                 cast(int, exp_cfg.max_compartments),
                 exp_cfg.n_compartments,
                 constant_records=total_examples if assignments_path is None else None,
+                shuffle_seed=(base_seed if config.data.shuffle else None),
                 permute_tokens=exp_cfg.permute_tokens_per_compartment,
                 permutations_path=(
                     permutations_path

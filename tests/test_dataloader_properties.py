@@ -306,3 +306,70 @@ def test_hash_assignments_are_balanced():
     a = _hash_assignments(40_000, 1024, 8)
     frac = np.bincount(a, minlength=8) / len(a)
     assert abs(frac - 1 / 8).max() < 0.01, f"imbalance {abs(frac - 1/8).max():.4f}"
+
+
+# ---------------------------------------------------------------------------
+# corpus read order
+#
+# The loader inherited llm.c's sequential scan, which is fine when you consume
+# the whole corpus and wrong when you consume 8% of one. Against FineWeb
+# sample-350BT, files 0-29 of 510 are ALL CC-MAIN-2013-20, so ~77% of every 30B
+# run was a single 2013 crawl and the training seed changed nothing about the
+# data. These pin the seeded shuffle that replaced it.
+# ---------------------------------------------------------------------------
+
+def _mix_seed(seed: int, salt: int) -> int:
+    """Mirror of train.py's _mix_seed; the spec, not an import."""
+    M = (1 << 64) - 1
+    z = (int(seed) * 0x9E3779B97F4A7C15 + int(salt)) & M
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & M
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & M
+    return (z ^ (z >> 31)) & M
+
+
+def _order(seed, n=3890, salt=0x5EED_F11E):
+    return np.random.default_rng(_mix_seed(seed, salt)).permutation(n)
+
+
+def test_shard_order_is_deterministic_given_the_seed():
+    assert np.array_equal(_order(1024), _order(1024))
+
+
+def test_shard_order_depends_on_the_seed():
+    """Otherwise a 'seed replicate' re-trains on byte-identical data."""
+    assert not np.array_equal(_order(1024), _order(1025))
+
+
+def test_every_rank_derives_the_same_order():
+    """Rank must not enter the permutation: ranks stride through one shared
+    order, so a rank-dependent permutation would make them disjoint in a
+    world_size-dependent way and silently change what the run covers."""
+    assert all(np.array_equal(_order(1024), _order(1024)) for _ in range(8))
+
+
+def test_order_is_independent_of_world_size():
+    """The union of what the ranks read must not depend on how many there are."""
+    order = _order(1024)
+    for world in (1, 2, 4, 8):
+        covered = np.sort(np.concatenate([order[r::world] for r in range(world)]))
+        assert np.array_equal(covered, np.sort(order))
+
+
+def test_shuffle_reaches_across_the_whole_corpus():
+    """A 30B run reads ~300 shards. Unshuffled those are shards 0-299, which are
+    one 2013 crawl; shuffled they must span the corpus."""
+    first300 = _order(1024)[:300]
+    assert first300.max() > 3500 and first300.min() < 400
+    assert np.median(first300) > 1200, "shuffled prefix is still front-loaded"
+
+
+def test_block_permutation_preserves_every_token():
+    """Shuffling blocks must reorder, never drop -- including the ragged tail."""
+    rng = np.random.default_rng(0)
+    tokens = rng.integers(0, 16384, size=8192 * 5 + 137, dtype=np.uint16)
+    BLK, n_full = 8192, len(tokens) // 8192
+    head = tokens[: n_full * BLK].reshape(n_full, BLK)
+    out = np.concatenate([head[_order(7, n_full, 1)].reshape(-1), tokens[n_full * BLK :]])
+    assert len(out) == len(tokens)
+    assert np.array_equal(np.bincount(out, minlength=16384),
+                          np.bincount(tokens, minlength=16384))

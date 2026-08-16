@@ -22,6 +22,20 @@ class Data:
     # When set, each compartment reads from its own set of .bin shards.
     compartment_train_bins: list[str] | None = None
     compartment_val_bins: list[str] | None = None
+    # Shuffle the corpus read order (shard order, and block order within a shard),
+    # seeded by training.seed so every rank and every resume agree.
+    #
+    # DEFAULT CHANGED TO TRUE 2026-08-16. The unshuffled path is inherited from
+    # llm.c, which consumes its whole corpus so read order cannot matter. Ours is
+    # FineWeb sample-350BT, where files 0-29 of 510 are ALL CC-MAIN-2013-20 and a
+    # 30B run reads only the first ~39 files -- so ~77% of every 30B run was one
+    # 2013 crawl, a 100B run ~23%, and the training seed changed nothing about
+    # the data. Standard practice (Pythia, OLMo, Megatron, HF datatrove) is a
+    # global document shuffle before packing; this is the loader-side
+    # approximation, which needs no corpus rebuild.
+    #
+    # Set False to reproduce a pre-2026-08-16 run's data order exactly.
+    shuffle: FlagConversionOff[bool] = True
 
 
 @dataclass(frozen=True)
