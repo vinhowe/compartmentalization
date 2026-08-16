@@ -183,20 +183,27 @@ def find_resume_checkpoint(out_dir: str) -> Optional[Checkpoint]:
 
 
 def full_state_steps(
-    budgets_tokens, checkpoint_steps, tokens_per_iter: int, max_iters: int
+    budgets_tokens, tokens_per_iter: int, max_iters: int
 ) -> set[int]:
-    """Which scheduled steps also save optimizer state.
+    """Which steps also save optimizer state, i.e. which points a decay can fork from.
 
-    A budget rarely lands exactly on a checkpoint, so each claims the first
-    scheduled checkpoint at or past it. `max_iters` is always included: the end
-    of a stable run is what you would extend or fork from, and an unforkable
-    final checkpoint is the one omission you cannot repair afterwards.
+    A budget's branch point is the EXACT step that reaches it. Snapping to the
+    nearest scheduled checkpoint was the original behaviour and it silently moved
+    branch points by billions of tokens: `checkpoint_steps` is log-spaced, so the
+    late gaps are enormous, and a requested 27B branch landed at 29.36B, leaving
+    2.1% of a 30B budget for a decay that wants ~10%. The 90B branch of a 100B
+    run landed at 94.37B, leaving 5.6%.
+
+    Callers must union the result into `checkpoint_steps`: a step that is not
+    scheduled never saves at all, so an unscheduled branch point is silently
+    unforkable -- and a branch point you did not save cannot be reconstructed.
+
+    `max_iters` is always included: the end of a stable run is what you would
+    extend or fork from later.
     """
-    steps = {max_iters}
-    scheduled = sorted(s for s in checkpoint_steps if 0 < s <= max_iters)
+    steps = {int(max_iters)}
     for b in budgets_tokens or ():
-        for s in scheduled:
-            if s * tokens_per_iter >= b:
-                steps.add(s)
-                break
+        s = -(-int(b) // int(tokens_per_iter))          # ceil division
+        if 0 < s <= max_iters:
+            steps.add(s)
     return steps

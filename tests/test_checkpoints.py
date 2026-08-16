@@ -167,19 +167,35 @@ def test_include_rolling_false_excludes_it(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_each_budget_claims_the_first_checkpoint_at_or_past_it():
-    steps = {1_000, 5_000, 10_000, 12_000, 14_000, 20_000, 50_000}
+def test_each_budget_gets_its_exact_step_not_a_nearby_checkpoint():
+    """The branch point is the step that reaches the budget, full stop.
+
+    Snapping to the nearest scheduled checkpoint was the original behaviour and
+    it moved branch points by billions of tokens, because checkpoint_steps is
+    log-spaced and the late gaps are huge.
+    """
     tpi = 2_097_152
-    got = ck.full_state_steps((27e9,), steps, tpi, 50_000)
-    assert 12_000 * tpi < 27e9 <= 14_000 * tpi        # 25.2B < 27B <= 29.4B
-    assert got == {14_000, 50_000}
+    assert ck.full_state_steps((27e9,), tpi, 50_000) == {12_875, 50_000}
+    assert 12_875 * tpi >= 27e9 > 12_874 * tpi        # exactly the ceiling step
+
+
+def test_branch_point_leaves_the_intended_decay_length():
+    """The failure this prevents: a 27B branch on a 30B run left 2.1% of the
+    budget for a decay that wants ~10%, and 90B on a 100B run left 5.6%."""
+    tpi = 2_097_152
+    for budget, total, want_frac in ((27e9, 14_305, 0.10), (90e9, 47_684, 0.10)):
+        branch = min(ck.full_state_steps((budget,), tpi, total))
+        frac = (total - branch) / total
+        assert frac > want_frac * 0.9, (
+            f"branch at {branch} leaves only {100*frac:.1f}% of the budget to decay"
+        )
 
 
 def test_end_of_run_is_always_full_state():
     """An unforkable final checkpoint is the one omission you can't repair later."""
-    assert ck.full_state_steps((), {1_000, 50_000}, 2_097_152, 50_000) == {50_000}
+    assert ck.full_state_steps((), 2_097_152, 50_000) == {50_000}
 
 
 def test_budget_beyond_the_run_claims_nothing_extra():
     steps = {1_000, 50_000}
-    assert ck.full_state_steps((1e15,), steps, 2_097_152, 50_000) == {50_000}
+    assert ck.full_state_steps((1e15,), 2_097_152, 50_000) == {50_000}

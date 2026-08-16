@@ -1200,8 +1200,10 @@ def main(config: JobConfig) -> None:
         full_state_iters = frozenset()
     else:
         full_state_iters = ckpt_utils.full_state_steps(
-            full_state_at, checkpoint_steps, tokens_per_iter, config.training.max_iters
+            full_state_at, tokens_per_iter, config.training.max_iters
         )
+        # A branch point that is not a scheduled checkpoint never gets written.
+        checkpoint_steps = checkpoint_steps | full_state_iters
 
     def _checkpoint_dir(ck_root, it):
         """Path for the named checkpoint at iteration `it`."""
