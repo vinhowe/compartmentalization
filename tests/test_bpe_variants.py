@@ -174,3 +174,30 @@ def test_expansion_is_a_pure_resegmentation(table, freq):
     out, _ = expand(base, flat, off)
     rebuilt = [t for tid in base.tolist() for t in _flatten(tid, table, dropped)]
     assert out.tolist() == rebuilt
+
+
+def test_merge_selection_is_uniform_over_merges(table, freq):
+    """INVARIANT: merges are selected with equal probability, independent of how
+    frequent they are.
+
+    Pinned by a test because it is invisible in the output -- a frequency-weighted
+    selection produces drop sets that look entirely normal, hits the same
+    expansion target, and passes every other test here, while quietly changing
+    what the compartments are.
+    """
+    mids = np.array(sorted(table))
+    rank = np.argsort(np.argsort(-freq[mids]))          # 0 = most frequent merge
+    n = len(mids)
+    # Average rank of the dropped merges, over many compartments. Uniform
+    # selection centres on the midpoint; any frequency bias shifts it.
+    means = []
+    for c in range(40):
+        dropped, _ = select_dropped_merges(freq, table, 1.5, 1024, c)
+        idx = np.array([np.flatnonzero(mids == d)[0] for d in sorted(dropped)])
+        means.append(rank[idx].mean())
+    observed = float(np.mean(means))
+    midpoint = (n - 1) / 2.0
+    assert abs(observed - midpoint) < 0.06 * n, (
+        f"mean rank of dropped merges {observed:.1f} vs uniform midpoint "
+        f"{midpoint:.1f} -- selection is frequency-biased"
+    )
