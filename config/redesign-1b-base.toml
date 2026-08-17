@@ -19,6 +19,11 @@
 # learning_rate is a PLACEHOLDER pending the sweep. Do not run this as-is for
 # science.
 
+# Schema version. v2 drops the permutation flags (compartmentalization
+# is vocabulary expansion, full stop), translation_ratio_mode (always
+# absolute now) and assignment_seed (mirrored from training.seed).
+config_version = 2
+
 [data]
 train_bin = "data/fineweb350B-bpe16384-nodedup/fineweb350b-nodedup_train_*.bin"
 val_bin   = "data/fineweb350B-bpe16384-nodedup/fineweb350b-nodedup_val_*.bin"
@@ -96,11 +101,7 @@ wandb_group = "redesign-1b"
 n_compartments = 1
 compartment_scaling = "equal"
 translation_ratio = 0
-translation_ratio_mode = "absolute"
 max_compartments = 16
-assignment_seed = 1024
 use_compartment_embeddings = true
-permute_tokens_per_compartment = false
-permute_input_tokens_per_compartment = true
 translation_mode = "standard"
 translation_chunk_size = 4

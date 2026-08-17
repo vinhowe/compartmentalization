@@ -101,6 +101,10 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     """
     out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in data.items()}
     version = config_version(out)
+    # Consumed here, not passed on: leaving it in the dict makes the dataclass
+    # builder report it as an unknown key, which is precisely the silently-ignored
+    # -field failure this version exists to end.
+    out.pop(VERSION_KEY, None)
     exp = out.setdefault("experiment", {})
 
     if version >= CURRENT_VERSION:
