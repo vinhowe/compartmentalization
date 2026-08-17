@@ -13,6 +13,8 @@ except ModuleNotFoundError:
 
 from .job_config import JobConfig
 
+from src.config import versioning
+
 
 class ConfigManager:
     """
@@ -55,6 +57,10 @@ class ConfigManager:
         This bypasses CLI parsing entirely. Only keys present in the dict are applied;
         other fields fall back to dataclass defaults.
         """
+        # Version adapter. v1 (no config_version) is converted to v2 semantics
+        # in memory so the rest of the code implements exactly one set of rules;
+        # v2 rejects fields it is not allowed to set. See src/config/versioning.py.
+        data = versioning.normalize(data)
         base_config = self._dict_to_dataclass(self.config_cls, data)
         self.config = base_config
         self._validate_config()
