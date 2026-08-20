@@ -432,6 +432,14 @@ class AssignmentsDataLoader:
         # Record count to assume when assignments_file is None (c=1). Only sets
         # the wrap point for assignment_idx; the records themselves are constant.
         constant_records: Optional[int] = None,
+        # Per-compartment BPE variants. <=1.0 disables, and the whole expansion
+        # path is then dead code -- the offset encoding below is untouched.
+        bpe_variant_expansion: float = 0.0,
+        bpe_variant_tokenizer: str = "",
+        bpe_variant_seed: int = 0,
+        # Where merge frequencies are counted. Must be the TRAIN shards for every
+        # loader, so train and val share one drop set per compartment.
+        bpe_variant_freq_pattern: str = "",
         # Seed for corpus read order; None reads shards and blocks in file order.
         # Identical on every rank on purpose -- rank disjointness comes from the
         # process_rank stride, so the union of what the ranks read does not
@@ -553,6 +561,35 @@ class AssignmentsDataLoader:
                 filename_pattern, process_rank, T, shuffle_seed=shuffle_seed
             )
             self._streams: Optional[list[_TokenStream]] = None
+
+        # Per-compartment merge-drop sets and expansion indices, built once.
+        # Each compartment gets its own drop set seeded by (bpe_variant_seed,
+        # compartment_id) and NOTHING else -- so a c=2 run's schemes are exactly a
+        # c=8 run's first two, and cross-c comparisons are not confounded by the
+        # compartments having different tokenizers.
+        self._expand: Optional[list] = None
+        # Unconsumed BASE tokens carried between examples. Compartment-agnostic,
+        # so this splices nothing: it is the same contiguous stream either way.
+        self._base_buf = np.empty(0, dtype=np.int64)
+        self._base_chunk = max(4096, T * 4)
+        if bpe_variant_expansion and bpe_variant_expansion > 1.0:
+            from src import bpe_variants as bv
+            table = bv.load_merge_table(bpe_variant_tokenizer)
+            # Frequencies come from the TRAIN pattern, always -- never from this
+            # loader's own data. Computing them per-loader gave the val loader a
+            # DIFFERENT drop set than train (9,412 vs 9,436 merges for
+            # compartment 0), i.e. the model would have been evaluated under a
+            # tokenization it never trained on. Silent: both look like 2.0x.
+            freq = bv.token_frequencies(
+                bpe_variant_freq_pattern or filename_pattern, base_vocab_size)
+            self._expand = []
+            for ci in range(n_compartments):
+                dropped, got = bv.select_dropped_merges(
+                    freq, table, float(bpe_variant_expansion), bpe_variant_seed, ci)
+                flat, off = bv.build_expansion_index(table, dropped, base_vocab_size)
+                self._expand.append((flat, off))
+                print0(f"[bpe-variant] compartment {ci}: {len(dropped):,} merges "
+                       f"dropped, expansion {got:.4f}x")
 
         # assignment index start (strided by world size)
         self.assignment_idx = self.process_rank % max(1, self.num_records)
@@ -688,13 +725,46 @@ class AssignmentsDataLoader:
                 half, T,
             )
         else:
-            # Single-source: read contiguous tokens from one stream
-            size_per_b = np.where(is_trans, half, T).astype(np.int64, copy=False)
-            starts = np.zeros(B, dtype=np.int64)
-            if B > 1:
-                starts[1:] = np.cumsum(size_per_b[:-1], dtype=np.int64)
-            total_needed = int(starts[-1] + size_per_b[-1])
-            tokens_batch = self._stream.read_tokens(total_needed).astype(np.int64, copy=False)  # type: ignore[union-attr]
+            if self._expand is not None:
+                # Each example consumes a VARIABLE number of base tokens, because
+                # its compartment's segmentation decides how far T tokens reach.
+                # Read until the budget is filled, per example, advancing one
+                # shared cursor -- so examples stay on disjoint, contiguous text.
+                samples = np.zeros((B, T), dtype=np.int64)
+                from src import bpe_variants as bv
+                for b in range(B):
+                    flat, off = self._expand[int(srcs[b])]
+                    need = int(half if is_trans[b] else T)
+                    got = np.empty(0, dtype=np.int64)
+                    while len(got) < need:
+                        if self._base_buf.size == 0:
+                            self._base_buf = self._stream.read_tokens(
+                                self._base_chunk
+                            ).astype(np.int64, copy=False)
+                        piece, used = bv.expand(
+                            self._base_buf, flat, off, limit=need - len(got))
+                        got = np.concatenate([got, piece])
+                        # `used` is how many BASE tokens that consumed. Keep the
+                        # rest: base tokens carry no compartment identity, so an
+                        # unconsumed remainder is usable by whichever example
+                        # comes next, whatever compartment it belongs to. Without
+                        # this the stream advances by the full chunk each time and
+                        # the run silently reads the corpus at ~2x the rate,
+                        # discarding half the text.
+                        self._base_buf = self._base_buf[used:]
+                    samples[b, :need] = got[:need]
+                # Same fill as the normal path: expansion happens BEFORE the
+                # compartment offset, so _fill_batch_single_source is untouched.
+                tokens_batch = samples.reshape(-1)
+                starts = np.arange(B, dtype=np.int64) * T
+            else:
+                # Single-source: read contiguous tokens from one stream
+                size_per_b = np.where(is_trans, half, T).astype(np.int64, copy=False)
+                starts = np.zeros(B, dtype=np.int64)
+                if B > 1:
+                    starts[1:] = np.cumsum(size_per_b[:-1], dtype=np.int64)
+                total_needed = int(starts[-1] + size_per_b[-1])
+                tokens_batch = self._stream.read_tokens(total_needed).astype(np.int64, copy=False)  # type: ignore[union-attr]
             self._fill_batch_single_source(
                 x_np, y_np, cid_np, idx_comp, idx_trans, srcs, dsts,
                 tokens_batch, starts, half, T,
@@ -1943,6 +2013,10 @@ def main(config: JobConfig) -> None:
             exp_cfg.n_compartments,
             constant_records=total_examples if assignments_path is None else None,
             shuffle_seed=(base_seed if config.data.shuffle else None),
+            bpe_variant_expansion=float(getattr(exp_cfg, "bpe_variant_expansion", 0.0) or 0.0),
+            bpe_variant_tokenizer=getattr(exp_cfg, "bpe_variant_tokenizer", ""),
+            bpe_variant_seed=int(base_seed),
+            bpe_variant_freq_pattern=train_bin,
             permute_tokens=exp_cfg.permute_tokens_per_compartment,
             permutations_path=(
                 permutations_path if exp_cfg.permute_tokens_per_compartment else None
@@ -1969,6 +2043,10 @@ def main(config: JobConfig) -> None:
                 exp_cfg.n_compartments,
                 constant_records=total_examples if assignments_path is None else None,
                 shuffle_seed=(base_seed if config.data.shuffle else None),
+                bpe_variant_expansion=float(getattr(exp_cfg, "bpe_variant_expansion", 0.0) or 0.0),
+                bpe_variant_tokenizer=getattr(exp_cfg, "bpe_variant_tokenizer", ""),
+                bpe_variant_seed=int(base_seed),
+                bpe_variant_freq_pattern=train_bin,
                 permute_tokens=exp_cfg.permute_tokens_per_compartment,
                 permutations_path=(
                     permutations_path
@@ -2501,7 +2579,16 @@ def main(config: JobConfig) -> None:
             ROLLING_CHECKPOINT_INTERVAL > 0
             and iter_num > 0
             and iter_num % ROLLING_CHECKPOINT_INTERVAL == 0
-            and iter_num not in checkpoint_steps
+            # Skip only when this step ALREADY writes a resumable checkpoint.
+            # The old condition skipped at every NAMED step, but named checkpoints
+            # are weights-only unless the step is in full_state_iters -- so on a
+            # run slow enough that the wall lands inside the dense early
+            # checkpoint region, every rolling save was suppressed and the job
+            # ended with nothing resumable. Observed on the H100 twin: dense
+            # named steps cover every multiple of 1000 up to 10,000, the first
+            # rolling save would have been iter 11,000, and 24h reached ~9,800.
+            # The run was unresumable by construction.
+            and iter_num not in full_state_iters
         ):
             _save_rolling_checkpoint(
                 out_dir, raw_model, optimizer, train_loader,
