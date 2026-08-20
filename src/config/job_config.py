@@ -261,6 +261,37 @@ class Experiment:
     # corrupted -- but to reproduce a paper run bit-for-bit, set assignment_order
     # = "lcg" in that config. Only c>1 is affected; c=1 makes the array constant.
     assignment_order: str = "hash"
+    # Per-compartment BPE variants. 0 or 1.0 = OFF (the default): compartments
+    # differ only by vocabulary offset, t -> t + i*V, which is the mechanism every
+    # run to date uses. Above 1.0, compartment i ADDITIONALLY tokenizes under its
+    # own subset of dropped BPE merges, so the same text expands by this ratio and
+    # the compartments differ in SEGMENTATION rather than only in id.
+    #
+    # Additive, not a replacement: the offset encoding is applied to the expanded
+    # ids exactly as before, so with this off the data path is byte-identical.
+    #
+    # 2.0 is where cross-compartment segmentation disagreement PEAKS (0.464 vs
+    # 0.391 at 1.5x). Not a monotone knob -- past 2.0 disagreement falls again,
+    # because dropping every merge gives atom-level tokenization, identical for
+    # every compartment. The ceiling is 4.159x.
+    # Tell the model its compartment with a PREFIX TOKEN instead of an additive
+    # embedding. Each compartment gets one extra vocabulary id, placed after the
+    # translation token (c*V + 1 + i), and every sequence begins with it.
+    #
+    # No tokenizer change is involved -- these are extra ids in the composite
+    # vocabulary, not new merges or a special-tokens file.
+    #
+    # This is the third answer to "how does the model know which compartment it
+    # is in": additive embedding (use_compartment_embeddings), nothing at all, or
+    # a prefix marker. Unlike the embedding, a marker costs one position of
+    # context per sequence -- the last content token is dropped so the length
+    # stays T -- which is 0.1% of a 1024-token window.
+    compartment_marker_token: FlagConversionOff[bool] = False
+
+    bpe_variant_expansion: float = 0.0
+    # Merge table source. Must be the tokenizer the corpus was built with, or the
+    # expansion is meaningless.
+    bpe_variant_tokenizer: str = "tokenizers/bpe-16384-fineweb1"
     # Maximum number of compartments. REQUIRED: must be provided in config.
     max_compartments: int | None = None
     # Advanced options

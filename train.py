@@ -440,6 +440,9 @@ class AssignmentsDataLoader:
         # Where merge frequencies are counted. Must be the TRAIN shards for every
         # loader, so train and val share one drop set per compartment.
         bpe_variant_freq_pattern: str = "",
+        # First id of the per-compartment prefix markers, or None to disable.
+        # Compartment i's marker is marker_base + i.
+        compartment_marker_base: Optional[int] = None,
         # Seed for corpus read order; None reads shards and blocks in file order.
         # Identical on every rank on purpose -- rank disjointness comes from the
         # process_rank stride, so the union of what the ranks read does not
@@ -567,6 +570,7 @@ class AssignmentsDataLoader:
         # compartment_id) and NOTHING else -- so a c=2 run's schemes are exactly a
         # c=8 run's first two, and cross-c comparisons are not confounded by the
         # compartments having different tokenizers.
+        self._marker_base = compartment_marker_base
         self._expand: Optional[list] = None
         # Unconsumed BASE tokens carried between examples. Compartment-agnostic,
         # so this splices nothing: it is the same contiguous stream either way.
@@ -945,6 +949,14 @@ class AssignmentsDataLoader:
                 base = self.base_vocab_size
                 src_off = srcs[idx_comp][:, None] * base
                 x_comp = samples + src_off
+            if self._marker_base is not None:
+                # Prefix each sequence with its compartment's marker id. The last
+                # content token is dropped so the length stays exactly T, which
+                # costs 0.1% of a 1024-token window. y is derived from x below,
+                # so the marker's target is the first content token -- the model
+                # is asked to predict from the marker, which is the point.
+                mk = (self._marker_base + srcs[idx_comp][:, None]).astype(x_comp.dtype)
+                x_comp = np.concatenate([mk, x_comp[:, :-1]], axis=1)
             y_comp = np.empty_like(x_comp)
             y_comp[:, :-1] = x_comp[:, 1:]
             y_comp[:, -1] = -1
@@ -1675,6 +1687,11 @@ def main(config: JobConfig) -> None:
         composite_vocab = base_vocab + 1
     else:
         composite_vocab = base_vocab * exp_cfg.n_compartments + 1
+        if getattr(exp_cfg, "compartment_marker_token", False):
+            # c extra ids, one prefix marker per compartment, placed after the
+            # translation token. Marker for compartment i is composite_vocab + i
+            # BEFORE this widening, i.e. base_vocab*c + 1 + i.
+            composite_vocab += exp_cfg.n_compartments
     # Translation token id is always the last id in the vocab
     if tying_compact_vocab is not None:
         translation_token_id_cfg = tying_compact_vocab
@@ -2017,6 +2034,8 @@ def main(config: JobConfig) -> None:
             bpe_variant_tokenizer=getattr(exp_cfg, "bpe_variant_tokenizer", ""),
             bpe_variant_seed=int(base_seed),
             bpe_variant_freq_pattern=train_bin,
+            compartment_marker_base=(base_vocab * exp_cfg.n_compartments + 1
+                if getattr(exp_cfg, 'compartment_marker_token', False) else None),
             permute_tokens=exp_cfg.permute_tokens_per_compartment,
             permutations_path=(
                 permutations_path if exp_cfg.permute_tokens_per_compartment else None
@@ -2047,6 +2066,8 @@ def main(config: JobConfig) -> None:
                 bpe_variant_tokenizer=getattr(exp_cfg, "bpe_variant_tokenizer", ""),
                 bpe_variant_seed=int(base_seed),
                 bpe_variant_freq_pattern=train_bin,
+                compartment_marker_base=(base_vocab * exp_cfg.n_compartments + 1
+                    if getattr(exp_cfg, 'compartment_marker_token', False) else None),
                 permute_tokens=exp_cfg.permute_tokens_per_compartment,
                 permutations_path=(
                     permutations_path
