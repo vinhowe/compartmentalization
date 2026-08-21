@@ -309,7 +309,12 @@ class Experiment:
     # If true, use per-compartment permutations of base tokens. Model/tokenizer
     # vocab becomes base_vocab+1 (translation token only) and tokens are mapped
     # through a seeded permutation per compartment at data loading time.
-    permute_tokens_per_compartment: FlagConversionOff[bool] = True
+    # DEFAULT FLIPPED TO FALSE 2026-08-21. It was True, which meant a config that
+    # omitted this field silently selected PERMUTATION -- a mechanism no c>1 run
+    # has ever used. When the v2 adapter (which sets it False) was absent on ORC,
+    # four 8-GPU runs trained the wrong experiment without erroring. A default
+    # should degrade to the behaviour actually in use.
+    permute_tokens_per_compartment: FlagConversionOff[bool] = False
     # When permuting tokens per compartment, controls whether model *inputs* are
     # also permuted. If False, inputs use the unpermuted base tokens while
     # targets remain in the permuted id space.

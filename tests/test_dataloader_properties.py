@@ -373,3 +373,36 @@ def test_block_permutation_preserves_every_token():
     assert len(out) == len(tokens)
     assert np.array_equal(np.bincount(out, minlength=16384),
                           np.bincount(tokens, minlength=16384))
+
+
+# ---------------------------------------------------------------------------
+# compartmentalization mechanism
+#
+# On 2026-08-21 four 8-GPU runs (~46h completed, 26h killed) trained the WRONG
+# mechanism because permute_tokens_per_compartment defaulted to True and the
+# adapter that would have set it False was not present on ORC. A config that
+# omits the field must never select permutation.
+# ---------------------------------------------------------------------------
+
+def test_permutation_is_never_the_default():
+    """INVARIANT: compartmentalization is vocabulary expansion, never permutation.
+
+    A default of True means any config that omits the field -- or any host
+    missing the version adapter -- silently runs a different experiment without
+    erroring. The default must degrade to the mechanism actually in use.
+    """
+    import dataclasses
+    from src.config.job_config import Experiment
+    d = {f.name: f.default for f in dataclasses.fields(Experiment)}
+    assert d["permute_tokens_per_compartment"] is False
+
+
+def test_every_redesign_config_uses_expansion_not_permutation():
+    import glob
+    from src.config.manager import ConfigManager
+    offenders = []
+    for p in sorted(glob.glob("config/redesign-*.toml")):
+        e = ConfigManager().load_from_toml_file(p).experiment
+        if e.permute_tokens_per_compartment is not False:
+            offenders.append(p)
+    assert not offenders, f"configs selecting permutation: {offenders}"
