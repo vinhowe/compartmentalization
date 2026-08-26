@@ -12,7 +12,7 @@ pictures and the number in the paper are computed from identical activations.
 | `compute_twin_clouds.py --mode models` | final-checkpoint layer-4 residuals for the three c=8 headline models → `cache_twinclouds/clouds_*.npz` |
 | `compute_twin_clouds.py --mode trajectory` | layer-4 residuals at every named checkpoint of the two phase-transition runs → `cache_twinclouds/traj_*.npz` |
 | `plot_twin_clouds.py` | `figures/twin_clouds_2d.*` and `figures/twin_clouds_book.*` |
-| `plot_centroid_trajectory.py` | `figures/centroid_paths.*`, and with `--animate` the GIF |
+| `plot_centroid_trajectory.py` | `figures/centroid_paths.*`, and with `--animate` the MP4 |
 
 All are run from `experiment/`, matching the sibling eval scripts.
 
@@ -136,6 +136,38 @@ its own global RMS first.
 set — never the training-time val loss, which mixes in translation pairs and is
 biased downward by an amount that scales with tr, i.e. exactly the axis being
 compared. The c=1 baseline is drawn as the floor.
+
+## Animation output format
+
+`--animate` writes MP4 by default (`--format mp4|gif|both`). Prefer MP4: GIF has
+a 256-entry palette, which turns thin coloured paths, faint scatter and
+antialiased text into dither noise on a white background, and matplotlib
+quantises each frame independently so the result also flickers. H.264 at CRF 17
+has none of those problems and is *smaller* here (2.5 MB vs 1.9 MB for a frame
+that is 2.2x the pixels).
+
+There is no system ffmpeg on these boxes. `find_ffmpeg()` falls back to the
+static binary inside the imageio-ffmpeg wheel:
+
+```
+uv pip install --python .venv/bin/python imageio-ffmpeg
+```
+
+Without it the script says so and writes a GIF instead. Encoder flags worth
+keeping: `-pix_fmt yuv420p` and even dimensions (otherwise phones and Telegram's
+inline player refuse it), and `-movflags +faststart` so it streams.
+
+Two style profiles drive the same drawing code, selected by `use_style()`. Print
+weights (0.9pt paths, 1.4pt dots) disappear on a phone; the `video` profile
+thickens marks, enlarges type and squares up the layout to 1440x1140, which uses
+far more of a phone screen than the 1.45:1 print aspect.
+
+Telegram note: `notify.sh` routes by MIME type, and video or GIF sent as a
+*document* arrives as a file card that must be downloaded before it plays. It
+now uses `sendVideo` / `sendAnimation` so animations autoplay inline. Static
+PNGs go via `sendPhoto`, which re-encodes to JPEG and caps the long side around
+1280px — for a 2400px-wide figure that costs real detail, so send the PDF as a
+document when the fine structure matters.
 
 ## Cache
 

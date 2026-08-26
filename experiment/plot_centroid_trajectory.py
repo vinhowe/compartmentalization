@@ -67,6 +67,57 @@ RUNS = [
 COMP_CMAP = "tab10"
 RUN_COLOR = {"tr025": "#c2410c", "tr05": "#1d4ed8"}
 
+# Print and video want genuinely different marks. A 0.9pt path and a 1.4pt dot
+# are right on a page at 300+ dpi and vanish on a phone, where the frame is a
+# few inches wide and H.264 has already thrown away the lowest-contrast detail.
+# Same geometry, two sets of weights.
+STYLE = {
+    "paper": dict(figsize=(9.6, 6.6), dpi=None, token_s=1.4, token_alpha=0.14,
+                  path_lw=0.9, start_s=9, cur_s=34, title_fs=8.5, legend_fs=6.5,
+                  minor_fs=6, suptitle_fs=9.5, base_fs=9, tick_fs=8,
+                  height_ratios=[1.0, 0.52], hspace=0.34, top=0.88, bottom=0.09,
+                  suptitle_y=1.0),
+    "video": dict(figsize=(9.6, 7.6), dpi=150, token_s=4.5, token_alpha=0.24,
+                  path_lw=2.0, start_s=30, cur_s=110, title_fs=13.5,
+                  legend_fs=11, minor_fs=9, suptitle_fs=14, base_fs=13,
+                  tick_fs=11,
+                  height_ratios=[1.0, 0.62], hspace=0.40, top=0.83, bottom=0.075,
+                  suptitle_y=0.975),
+}
+ST = STYLE["paper"]
+
+
+def use_style(name: str):
+    """Select the mark weights and re-apply matplotlib rcParams to match."""
+    global ST
+    ST = STYLE[name]
+    setup_paper_style()
+    plt.rcParams.update({
+        "font.size": ST["base_fs"],
+        "axes.titlesize": ST["base_fs"],
+        "axes.labelsize": ST["base_fs"],
+        "xtick.labelsize": ST["tick_fs"],
+        "ytick.labelsize": ST["tick_fs"],
+        "lines.linewidth": 1.3 if name == "paper" else 2.0,
+    })
+
+
+def find_ffmpeg():
+    """Path to an ffmpeg binary, or None.
+
+    There is no system ffmpeg on these boxes, so fall back to the static build
+    that ships inside the imageio-ffmpeg wheel (`uv pip install imageio-ffmpeg`).
+    """
+    import shutil
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
 
 def comp_colors(c: int):
     cmap = plt.get_cmap(COMP_CMAP)
@@ -223,25 +274,24 @@ def draw_bottom(ax_val, ax_cos, data):
     ax_val.set_xlabel("step"); ax_cos.set_xlabel("step")
     ax_val.set_ylabel("excess val loss over\nc=1 baseline (nats)")
     ax_cos.set_ylabel("cosine sim.\n(layer 4)")
-    ax_val.legend(frameon=False, fontsize=6.5, loc="lower left")
-    ax_cos.legend(frameon=False, fontsize=6.5, loc="upper left")
+    ax_val.legend(frameon=False, fontsize=ST["legend_fs"], loc="lower left")
+    ax_cos.legend(frameon=False, fontsize=ST["legend_fs"], loc="upper left")
     ax_cos.axhline(0, color="k", lw=0.5, alpha=0.4, ls=":")
     # A log axis spanning ~2.2 down to ~0.2 gets exactly one decade tick, so
     # label the minor ticks too or the panel carries no readable scale.
-    from matplotlib.ticker import ScalarFormatter, NullFormatter
+    from matplotlib.ticker import FixedLocator, NullLocator, ScalarFormatter
+    ax_val.yaxis.set_major_locator(FixedLocator([0.2, 0.3, 0.5, 1.0, 2.0]))
+    ax_val.yaxis.set_minor_locator(NullLocator())
     ax_val.yaxis.set_major_formatter(ScalarFormatter())
-    ax_val.yaxis.set_minor_formatter(ScalarFormatter())
-    ax_val.tick_params(axis="y", which="minor", labelsize=6)
     for a in (ax_val, ax_cos):
         a.grid(alpha=0.25)
 
 
 def build_figure(data, args):
-    setup_paper_style()
-    fig = plt.figure(figsize=(9.6, 6.6))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 0.52], hspace=0.34,
-                          wspace=0.22, top=0.88, bottom=0.09,
-                          left=0.09, right=0.97)
+    fig = plt.figure(figsize=ST["figsize"], dpi=ST["dpi"] or plt.rcParams["figure.dpi"])
+    gs = fig.add_gridspec(2, 2, height_ratios=ST["height_ratios"],
+                          hspace=ST["hspace"], wspace=0.24, top=ST["top"],
+                          bottom=ST["bottom"], left=0.10, right=0.97)
     ax_paths = [fig.add_subplot(gs[0, i]) for i in range(2)]
     ax_val = fig.add_subplot(gs[1, 0])
     ax_cos = fig.add_subplot(gs[1, 1])
@@ -260,17 +310,18 @@ def render_paths(ax, tr, upto: int, args, static: bool):
         sub = tr["sub_p"][upto]
         keep = tr["_tok_idx"]
         for j in range(c):
-            ax.scatter(sub[j, keep, 0], sub[j, keep, 1], s=1.4, color=cols[j],
-                       alpha=0.14, linewidths=0, zorder=1)
+            ax.scatter(sub[j, keep, 0], sub[j, keep, 1], s=ST["token_s"],
+                       color=cols[j], alpha=ST["token_alpha"], linewidths=0,
+                       zorder=1)
 
     P = tr["cen_p"]
     for j in range(c):
         ax.plot(P[: upto + 1, j, 0], P[: upto + 1, j, 1], color=cols[j],
-                lw=0.9, alpha=0.55, zorder=2)
-        ax.scatter(P[0, j, 0], P[0, j, 1], s=9, facecolors="none",
-                   edgecolors=cols[j], linewidths=0.7, zorder=3)
-        ax.scatter(P[upto, j, 0], P[upto, j, 1], s=34, color=cols[j],
-                   zorder=4, edgecolors="white", linewidths=0.5)
+                lw=ST["path_lw"], alpha=0.6, zorder=2)
+        ax.scatter(P[0, j, 0], P[0, j, 1], s=ST["start_s"], facecolors="none",
+                   edgecolors=cols[j], linewidths=1.1, zorder=3)
+        ax.scatter(P[upto, j, 0], P[upto, j, 1], s=ST["cur_s"], color=cols[j],
+                   zorder=4, edgecolors="white", linewidths=1.0)
 
     ax.set_xlim(*xl); ax.set_ylim(*yl)
     ax.set_aspect("equal", adjustable="box")
@@ -280,7 +331,7 @@ def render_paths(ax, tr, upto: int, args, static: bool):
     ax.set_title(
         f"{tr['label']}\nstep {tr['steps'][upto]:,}   "
         f"cos {tr['cos'][upto]:.3f}   spread {tr['spread'][upto]:.3f}",
-        fontsize=8.5, pad=5)
+        fontsize=ST["title_fs"], pad=5)
 
 
 def main():
@@ -297,9 +348,13 @@ def main():
     ap.add_argument("--hold", type=int, default=10,
                     help="extra frames held on the last checkpoint")
     ap.add_argument("--tag", default="")
+    ap.add_argument("--format", default="mp4", choices=["mp4", "gif", "both"],
+                    help="mp4 is far cleaner for phone viewing; gif is the "
+                         "fallback when no ffmpeg is available")
     args = ap.parse_args()
 
     FIGDIR.mkdir(exist_ok=True)
+    use_style("paper")
     data = prepare(args)
 
     rng = np.random.Generator(np.random.PCG64(11))
@@ -325,7 +380,7 @@ def main():
         "Compartment centroids across training, projected into one fixed basis "
         "(hollow marker = step 100)\n"
         "same architecture, same seed, only the translation ratio differs",
-        fontsize=9.5, y=1.0)
+        fontsize=ST["suptitle_fs"], y=ST["suptitle_y"])
     for ext in ("pdf", "png"):
         fig.savefig(FIGDIR / f"centroid_paths{tag}.{ext}", bbox_inches="tight",
                     dpi=220)
@@ -336,6 +391,9 @@ def main():
         return
 
     # ── animation ───────────────────────────────────────────────────────────
+    use_style("video")
+    for name, tr in data.items():
+        tr["_tok_idx"] = tr["_tok_idx"][: args.n_tokens]
     fig, ax_paths, ax_val, ax_cos = build_figure(data, args)
     n_frames = min(len(data[n]["steps"]) for n, _, _ in RUNS)
     # Pin the step axes before adding the scrubber: an axvline placed at x=1
@@ -349,7 +407,7 @@ def main():
     fig.suptitle(
         "Compartment centroids across training, projected into one fixed basis\n"
         "same architecture, same seed, only the translation ratio differs",
-        fontsize=9.5, y=1.0)
+        fontsize=ST["suptitle_fs"], y=ST["suptitle_y"])
 
     def update(f):
         i = min(f, n_frames - 1)
@@ -363,10 +421,35 @@ def main():
     total = n_frames + args.hold
     anim = manim.FuncAnimation(fig, update, frames=total, interval=1000 / args.fps,
                                blit=False)
-    out = FIGDIR / f"centroid_trajectory{tag}.gif"
-    anim.save(out, writer=manim.PillowWriter(fps=args.fps))
+
+    wants = ["mp4", "gif"] if args.format == "both" else [args.format]
+    ffmpeg = find_ffmpeg()
+    if "mp4" in wants and not ffmpeg:
+        print("  no ffmpeg found; falling back to GIF "
+              "(`uv pip install imageio-ffmpeg` to get one)")
+        wants = ["gif" if w == "mp4" else w for w in wants]
+
+    for fmt in dict.fromkeys(wants):
+        out = FIGDIR / f"centroid_trajectory{tag}.{fmt}"
+        if fmt == "mp4":
+            matplotlib.rcParams["animation.ffmpeg_path"] = ffmpeg
+            # yuv420p + even dimensions is what makes the file playable
+            # everywhere (phones, Telegram's inline player) rather than only in
+            # desktop VLC; faststart puts the index first so it streams instead
+            # of downloading whole. CRF 17 is close enough to lossless for flat
+            # colour on white, which is exactly what GIF's 256-entry palette
+            # mangles into dither noise.
+            writer = manim.FFMpegWriter(
+                fps=args.fps, codec="libx264",
+                extra_args=["-pix_fmt", "yuv420p", "-crf", "17",
+                            "-preset", "slow", "-movflags", "+faststart",
+                            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
+        else:
+            writer = manim.PillowWriter(fps=args.fps)
+        anim.save(out, writer=writer, dpi=ST["dpi"] or None)
+        mb = out.stat().st_size / 1048576
+        print(f"  wrote {out}  ({total} frames @ {args.fps}fps, {mb:.1f} MB)")
     plt.close(fig)
-    print(f"  wrote {out}  ({total} frames @ {args.fps}fps)")
 
 
 if __name__ == "__main__":
