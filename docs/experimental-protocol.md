@@ -285,10 +285,46 @@ and explains why.
 | min_lr | peak / 10 | inherited nanoGPT 6e-5 is ABOVE our peak and would invert the decay |
 | batch | 2.097M tokens/step | 2048 seq x 1024, inside the 1-4M band of GPT-3 1.3B / Pythia-1B / OLMo-1B |
 | budget | 30B grid, >=131B at R6 | see below |
-| weight decay | 0 | deliberate and separately studied |
+| weight decay | **0** | not convention -- nonzero wd manufactures a c-dependent penalty. See 5.1 |
 | dtype | bfloat16 | FP8 rejected: per-tensor scaling on a projection 16k wide at c=1 and 131k at c=8 puts numerics on the experimental axis |
 | data | `fineweb350B-bpe16384-nodedup` | with a manifest; dedup is a measured condition, never an undisclosed default |
 | `auto_batch_config` | **false** | presets would retune batch/accum for VRAM and silently change tokens-per-step out from under an exact budget |
+
+### 5.1 Weight decay is 0, and that is a measurement requirement
+
+Every published ladder holds weight decay CONSTANT across sizes and does not
+tune it per rung: Pythia 0.01 across 70M-12B, GPT-3 / OLMo / Llama / SmolLM2 0.1.
+Only the learning rate varies. That asymmetry is principled rather than lazy:
+in AdamW the decay update is `w <- w - lr*wd*w`, so LR and WD enter
+MULTIPLICATIVELY and the product sets the decay timescale. Tuning LR already
+sweeps effective decay, which makes a 2-D sweep largely redundant. (The honest
+tension: constant WD with per-rung LR does let effective decay drift across the
+ladder. The field tolerates this and it has not been shown to matter at these
+scales.)
+
+We use **wd = 0**, and here that is not a stylistic departure -- it removes a
+confound that would sit directly on the experimental axis.
+
+`configure_optimizers` decays every parameter with `dim() >= 2`, which includes
+BOTH embedding tables (verified: 146,805,760 of the 146.81M parameters in an
+R1-c8 model are in the decayed group). AdamW applies decay on every step to
+every parameter in that group, **regardless of whether it received gradient**.
+
+At c=8 each compartment's embedding rows receive gradient on roughly 1/8 of
+steps but are decayed on 8/8. A c=8 row is therefore shrunk about 8x harder per
+unit of gradient signal than the corresponding c=1 row. Nonzero weight decay
+would manufacture a compartmentalization penalty OUT OF THE OPTIMIZER, with the
+same shape as the effect being measured and no way to separate the two after
+the fact.
+
+So the ordering of the argument matters when this is written up: wd=0 is not
+"we happened to study wd separately", it is "nonzero wd biases the c comparison
+by construction". That is the answer to a reviewer asking why we sit at 0 when
+the field sits at 0.1.
+
+Worth measuring rather than asserting: two runs at R1 (c=1 and c=8) at wd=0.1
+and the swept-optimal LR, against the wd=0 runs the sweep already produces,
+exhibit the differential penalty directly for ~4 GPU-hours.
 
 ### Budgets are specified in TOKENS
 
