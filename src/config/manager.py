@@ -98,10 +98,27 @@ class ConfigManager:
 
         try:
             with open(file_path, "rb") as f:
-                return tomllib.load(f)
+                data = tomllib.load(f)
         except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
             print(f"Error while loading config file: {file_path}")
             raise e
+
+        # train.py reaches configs through parse_args(), NOT load_from_dict(),
+        # so without this the version adapter never ran on the one path that
+        # actually trains a model: `config_version = 2` was dropped as an
+        # unknown key and every v2 guarantee -- reject a removed field rather
+        # than ignore it, pin the canonical values explicitly -- was skipped.
+        # sweep_runner (load_from_toml_file) enforced v2 while train.py did not,
+        # which is precisely the silently-ignored-field failure v2 exists to end.
+        #
+        # Scoped to v2 ON PURPOSE. normalize() also rewrites v1 compartment-mode
+        # translation ratios, and the 226 archived v1 configs must keep resolving
+        # through this path to exactly what they always did. v1 is passed through
+        # untouched; only configs that opt in by declaring config_version >= 2
+        # get the adapter.
+        if versioning.config_version(data) >= versioning.CURRENT_VERSION:
+            data = versioning.normalize(data)
+        return data
 
     def _dict_to_dataclass(self, cls, data: dict[str, Any]) -> Any:
         """Convert dictionary to dataclass, handling nested structures."""
