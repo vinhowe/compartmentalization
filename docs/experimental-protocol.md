@@ -217,12 +217,28 @@ Swept at **two** widths, not one, because the ladder needs the *slope* of
 optimal LR versus width as much as it needs its dependence on `c`:
 
 ```
-widths  R1 (4x512) and R4 (8x1024)
-c       1 and 8
+widths  R1 (4x512), R3 (6x768), R4 (8x1024)
+arms    c1 and c8 at every swept width; c1-padded at R1 only
 LR      the 5-point grid above
 budget  3B tokens, full WSD including the decay
-        -> 20 runs, ~14 h of 8xA100
+        -> 35 runs, ~298 GPU-hours
 ```
+
+**Three widths, not two.** Two points fit a line with zero residual, so they
+cannot falsify the rule they produce -- and that rule is then extrapolated 2x
+beyond the swept range to reach R6. R3 is interpolation, which is precisely
+what validates the functional form: if R1/R3/R4 are collinear in log-log,
+extrapolating to R5/R6 is justified; if they are not, that is known before the
+expensive rungs launch. Sweeping R6 directly costs 581 GPU-hours -- more than
+the R6 ladder rung itself -- so R6 is anchored against published values instead.
+
+**c1-padded is swept, not assumed equal to c1.** It is tempting to argue its
+extra rows are dead and so its optimum matches c1's. That is wrong at the head:
+the unused INPUT embedding rows are indeed dead, but every one of the 131073
+OUTPUT rows receives gradient through the softmax denominator, because
+`dL/dlogit_j = p_j - y_j` pushes unused rows down at every step. Its optimizer
+dynamics therefore genuinely differ from c1. Swept at R1, where the wide vocab
+is cheapest.
 
 The decay is included because LR optima measured on non-annealed constant-LR
 runs sit at a different place than annealed ones, and the ladder is annealed.
