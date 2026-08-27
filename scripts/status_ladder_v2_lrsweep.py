@@ -13,9 +13,9 @@ from __future__ import annotations
 import pathlib
 import re
 
-LOG_ROOT = pathlib.Path(
-    "/mnt/pccfs2/backed_up/vin/dev/translation-compression/logs/ladder-v2-lrsweep"
-)
+ROOT = pathlib.Path("/mnt/pccfs2/backed_up/vin/dev/translation-compression")
+LOG_ROOT = ROOT / "logs" / "ladder-v2-lrsweep"
+OUT_ROOT = ROOT / "out" / "ladder-v2-lrsweep"
 MAX_ITERS = 1431
 
 ITER_RE = re.compile(r"^iter (\d+): loss ([\d.]+|nan)", re.M)
@@ -38,10 +38,17 @@ def main() -> int:
         last_iter = int(iters[-1][0]) if iters else 0
         last_loss = iters[-1][1] if iters else "-"
         last_val = evals[-1][2] if evals else "-"
-        dead = bool(DEAD_RE.search(text))
+        # A log is only evidence about the CURRENT attempt if that attempt got
+        # as far as creating the run's output directory -- the launcher mkdirs
+        # it before exec'ing train.py. After a relaunch the not-yet-started runs
+        # still hold their previous log, and reporting those as DIED buries the
+        # real failures among stale ones.
+        started = (OUT_ROOT / p.stem).exists()
+        dead = bool(DEAD_RE.search(text)) and started
         diverged = last_loss == "nan" or last_val == "nan"
         pct = 100.0 * last_iter / MAX_ITERS
         state = ("DIED" if dead else
+                 "pending" if not started else
                  "diverged" if diverged else
                  "done" if last_iter >= MAX_ITERS - 2 else
                  "running")
@@ -60,10 +67,12 @@ def main() -> int:
     for r in sorted(rows, key=lambda r: r[0]):
         print("  ".join(str(c).ljust(w[i]) for i, c in enumerate(r)))
 
+    pend = sum(1 for r in rows if r[5] == "pending")
     done = sum(1 for r in rows if r[5] == "done")
     dead = sum(1 for r in rows if r[5] == "DIED")
     div = sum(1 for r in rows if r[5] == "diverged")
-    print(f"\n{len(rows)} launched | {done} done | {div} diverged | {dead} died")
+    print(f"\n{len(rows)} configs | {len(rows)-pend} started | {done} done | "
+          f"{div} diverged | {dead} died | {pend} pending")
     if div:
         print("note: divergence at the top of the LR grid is an informative "
               "bracket, not a failure -- it is what makes the argmin interior.")

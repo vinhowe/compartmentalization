@@ -113,6 +113,23 @@ def main() -> int:
         print("no sweep configs found")
         return 1
 
+    # Preflight: resolve the training glob exactly as train.py will, from the
+    # same cwd. train.py resolves data paths RELATIVE to the working directory,
+    # so a checkout without a data/ link (e.g. a git worktree, where data/ is
+    # gitignored and therefore absent) fails the assert only after model init,
+    # compile and wandb -- once per run, on every GPU, minutes in. Fifteen runs
+    # died that way. Fail here instead, before anything is scheduled.
+    import tomllib
+    with open(js[0], "rb") as fh:
+        pattern = tomllib.load(fh)["data"]["train_bin"]
+    matches = list(REPO.glob(pattern)) if not os.path.isabs(pattern) else []
+    if not matches:
+        print(f"PREFLIGHT FAILED: no files match {pattern!r} relative to {REPO}")
+        print("  train.py resolves data paths against its cwd. In a worktree, link it:")
+        print(f"  ln -sfn {SHARED}/data/<corpus> {REPO}/data/<corpus>")
+        return 1
+    print(f"preflight ok: {len(matches)} shards match {pattern}")
+
     print(f"{len(js)} runs over {len(gpus)} GPUs {gpus}, longest-first")
     if args.dry_run:
         for i, c in enumerate(js):
