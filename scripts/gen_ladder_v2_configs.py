@@ -82,7 +82,28 @@ MICRO_BATCH = {
 # on a grid EDGE is not a result, it is an instruction to sweep again.
 LR_GRID = [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
 
-LRSWEEP_RUNGS = ["R1", "R4"]     # bottom and middle: gives the slope vs width
+# Which arms to sweep at which rung.
+#
+# THREE widths, not two. Two points fit a line with zero residual, so they
+# cannot falsify the fitted rule -- and LR(d) is then extrapolated 2x beyond the
+# swept range to reach R6. R3 is interpolation, which is exactly what validates
+# the functional form: if R1/R3/R4 are collinear in log-log, extrapolating to
+# R5/R6 is justified; if they are not, that is known before 356 GPU-hours are
+# committed. Sweeping R6 directly would cost 581 GPU-hours -- more than the R6
+# ladder rung itself -- so it is anchored against published values instead
+# (Pythia-1B ~3e-4, OLMo-1B ~4e-4).
+#
+# c1-padded is swept at R1 ONLY, where the wide vocab is cheapest. It is NOT
+# safe to assume LR*(c1-padded) == LR*(c1): while the unused INPUT embedding
+# rows are dead, every one of the 131073 OUTPUT rows receives gradient through
+# the softmax denominator (dL/dlogit_j = p_j - y_j pushes unused rows down), so
+# its optimizer dynamics genuinely differ from c1 at the head.
+LRSWEEP_ARMS = {
+    "R1": ("c1", "c8", "c1-padded"),
+    "R3": ("c1", "c8"),
+    "R4": ("c1", "c8"),
+}
+LRSWEEP_RUNGS = list(LRSWEEP_ARMS)
 LRSWEEP_TOKENS = 3_000_000_000
 LADDER_TOKENS = 30_000_000_000
 LADDER_BRANCH_AT = [27_000_000_000]   # branch point for a 30B anneal
@@ -295,7 +316,7 @@ def main() -> None:
     # ---- LR sweep: the experiment that must be read before the ladder runs
     for rung in LRSWEEP_RUNGS:
         n_layer, n_embd = by_name[rung]
-        for arm in ("c1", "c8"):
+        for arm in LRSWEEP_ARMS[rung]:
             for lr in LR_GRID:
                 tag = f"{lr:.0e}".replace("e-0", "e-")
                 name = f"ladder-v2-lrsweep-{rung.lower()}-{arm}-lr{tag}"

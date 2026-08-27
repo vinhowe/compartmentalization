@@ -22,6 +22,7 @@ import argparse
 import os
 import pathlib
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -32,18 +33,38 @@ PYTHON = SHARED / ".venv" / "bin" / "python"
 OUT_ROOT = SHARED / "out" / "ladder-v2-lrsweep"
 LOG_ROOT = SHARED / "logs" / "ladder-v2-lrsweep"
 
-# Relative cost, used only for longest-first ordering. Derived from
-# 6*N*D + attention at 3B tokens; absolute values do not matter here.
-COST = {("r1", "c1"): 1.0, ("r1", "c8"): 3.3,
-        ("r4", "c1"): 5.3, ("r4", "c8"): 10.0}
+# Hours per run on ONE A100, used only for longest-first ordering. Calibrated
+# against a measured 18.8 s/iter for r1-c8, scaled by (6*N_total + attention).
+# c1-padded costs what c8 costs -- same 131073-wide head, which is where the
+# time goes -- not what c1 costs.
+COST = {
+    ("r1", "c1"): 1.7, ("r1", "c8"): 7.5, ("r1", "c1-padded"): 7.5,
+    ("r3", "c1"): 3.8, ("r3", "c8"): 12.5, ("r3", "c1-padded"): 12.5,
+    ("r4", "c1"): 7.5, ("r4", "c8"): 19.1, ("r4", "c1-padded"): 19.1,
+}
 
 
-def jobs(config_dir: pathlib.Path) -> list[pathlib.Path]:
+def jobs(config_dir: pathlib.Path,
+         include: list[str] | None = None) -> list[pathlib.Path]:
     js = sorted(config_dir.glob("ladder-v2-lrsweep-*.toml"))
+    if include:
+        # Substring filter, so a second scheduler on another host can pick up
+        # only the arms the first one is not already running. train.py's
+        # active-run lock would catch an overlap anyway, but a launcher that
+        # relies on a lock to avoid double-scheduling is one preemption away
+        # from the ActiveRunError storm that produced 43% rc=1 in the old pool.
+        js = [p for p in js if any(tok in p.stem for tok in include)]
 
     def cost(p: pathlib.Path) -> float:
-        parts = p.stem.split("-")
-        return COST.get((parts[3], parts[4]), 1.0)
+        # ladder-v2-lrsweep-<rung>-<arm>-lr<value>. Parsed by regex, NOT by
+        # splitting on "-": the arm may itself contain a hyphen (c1-padded) and
+        # so may the lr tag (lr1e-3), so a positional split silently yields
+        # "c8-lr1e" and every run falls back to the default cost -- which
+        # quietly destroys the longest-first ordering rather than erroring.
+        m = re.match(r"^ladder-v2-lrsweep-(r\d+)-(.+)-lr[\de.+-]+$", p.stem)
+        if not m:
+            return 1.0
+        return COST.get((m.group(1), m.group(2)), 1.0)
 
     return sorted(js, key=cost, reverse=True)   # longest-first
 
@@ -79,11 +100,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     ap.add_argument("--config-dir", default=str(REPO / "config" / "ladder-v2"))
+    ap.add_argument("--include", default=None,
+                    help="comma-separated substrings; only matching runs are scheduled")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     gpus = [int(g) for g in args.gpus.split(",") if g.strip() != ""]
-    js = jobs(pathlib.Path(args.config_dir))
+    include = ([s for s in args.include.split(',') if s.strip()]
+               if args.include else None)
+    js = jobs(pathlib.Path(args.config_dir), include)
     if not js:
         print("no sweep configs found")
         return 1
