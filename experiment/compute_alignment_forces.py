@@ -189,9 +189,16 @@ def main():
         for st in pick:
             if str(st) in rows["points"]:
                 continue
+            # float32 is not optional here. The default load returns bfloat16,
+            # whose ~8 mantissa bits cannot resolve a quantity that is a ~0.1%
+            # component of the gradient; an earlier bf16 run produced values
+            # spaced exactly like bf16 at that magnitude.
             model, _, _ = load_eval_model_from_checkpoint(
-                run_dir / "checkpoints" / f"step-{st:06d}", run_dir, args.device)
+                run_dir / "checkpoints" / f"step-{st:06d}", run_dir, args.device,
+                dtype=torch.float32)
             model.eval()
+            assert next(model.parameters()).dtype == torch.float32, \
+                "gradient projections require float32"
             for p in model.parameters():
                 p.requires_grad_(True)
 
