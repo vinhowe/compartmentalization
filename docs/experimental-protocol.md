@@ -221,8 +221,21 @@ widths  R1 (4x512), R3 (6x768), R4 (8x1024)
 arms    c1 and c8 at every swept width; c1-padded at R1 only
 LR      the 5-point grid above
 budget  3B tokens, full WSD including the decay
-        -> 35 runs, ~298 GPU-hours
+        -> 35 runs, ~125 GPU-hours (measured, compile on)
 ```
+
+Measured per-run cost on one A100 with `torch.compile` enabled, which is 2.4x
+faster than the same model without it -- do not size a sweep from an
+uncompiled smoke test:
+
+| arm | s/iter | h/run |
+|---|---|---|
+| r1-c1 | 1.7 | 0.67 |
+| r1-c8, r1-c1-padded | 7.6 | 3.03 |
+| r3-c1 | 3.9 | 1.55 |
+| r3-c8 | 12.8 | 5.09 |
+| r4-c1 | 9.5 | 3.78 |
+| r4-c8 | 19.5 | 7.75 |
 
 **Three widths, not two.** Two points fit a line with zero residual, so they
 cannot falsify the rule they produce -- and that rule is then extrapolated 2x
