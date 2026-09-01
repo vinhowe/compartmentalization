@@ -10,12 +10,14 @@ Usage:  .venv/bin/python scripts/status_ladder_v2_lrsweep.py
 
 from __future__ import annotations
 
+import argparse
 import pathlib
 import re
 
 ROOT = pathlib.Path("/mnt/pccfs2/backed_up/vin/dev/translation-compression")
-LOG_ROOT = ROOT / "logs" / "ladder-v2-lrsweep"
-OUT_ROOT = ROOT / "out" / "ladder-v2-lrsweep"
+SUITE = "ladder-v2"
+LOG_ROOT = ROOT / "logs" / f"{SUITE}-lrsweep"
+OUT_ROOT = ROOT / "out" / f"{SUITE}-lrsweep"
 MAX_ITERS = 1431
 
 ITER_RE = re.compile(r"^iter (\d+): loss ([\d.]+|nan)", re.M)
@@ -24,6 +26,13 @@ DEAD_RE = re.compile(r"Traceback|OutOfMemoryError|CUDA out of memory|Killed|asse
 
 
 def main() -> int:
+    global SUITE, LOG_ROOT, OUT_ROOT
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--suite', default=SUITE)
+    a = ap.parse_args()
+    SUITE = a.suite
+    LOG_ROOT = ROOT / 'logs' / f'{SUITE}-lrsweep'
+    OUT_ROOT = ROOT / 'out' / f'{SUITE}-lrsweep'
     if not LOG_ROOT.exists():
         print(f"no logs at {LOG_ROOT}")
         return 1
@@ -52,7 +61,7 @@ def main() -> int:
                  "diverged" if diverged else
                  "done" if last_iter >= MAX_ITERS - 2 else
                  "running")
-        rows.append((p.stem.replace("ladder-v2-lrsweep-", ""),
+        rows.append((p.stem.replace(f"{SUITE}-lrsweep-", ""),
                      f"{last_iter}/{MAX_ITERS}", f"{pct:5.1f}%",
                      last_loss, last_val, state))
 

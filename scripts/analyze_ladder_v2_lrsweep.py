@@ -19,6 +19,7 @@ Usage:  .venv/bin/python scripts/analyze_ladder_v2_lrsweep.py
 
 from __future__ import annotations
 
+import argparse
 import math
 import pathlib
 import re
@@ -29,13 +30,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 ROOT = pathlib.Path("/mnt/pccfs2/backed_up/vin/dev/translation-compression")
-LOG_ROOT = ROOT / "logs" / "ladder-v2-lrsweep"
-FIG = ROOT / "figures" / "ladder-v2-lrsweep.png"
+SUITE = "ladder-v2"
+LOG_ROOT = ROOT / "logs" / f"{SUITE}-lrsweep"
+FIG = ROOT / "figures" / f"{SUITE}-lrsweep.png"
 MAX_ITERS = 1431
 
 EVAL_RE = re.compile(
     r"^step (\d+): train loss ([\d.]+|nan), val loss ([\d.]+|nan)", re.M)
-NAME_RE = re.compile(r"^ladder-v2-lrsweep-(r\d+)-(.+)-lr([\d.e+-]+)$")
+def _name_re():
+    return re.compile(rf"^{re.escape(SUITE)}-lrsweep-(r\d+)-(.+)-lr([\d.e+-]+)$")
 
 # rung -> d_model, for the LR*(d) fit
 WIDTH = {"r1": 512, "r3": 768, "r4": 1024}
@@ -47,7 +50,7 @@ def parse() -> dict:
     for p in sorted(LOG_ROOT.glob("*.log")):
         if p.name.startswith("_"):
             continue
-        m = NAME_RE.match(p.stem)
+        m = _name_re().match(p.stem)
         if not m:
             continue
         rung, arm, lr = m.group(1), m.group(2), float(m.group(3))
@@ -73,6 +76,13 @@ def argmin_lr(cell: dict) -> tuple[float, float] | None:
 
 
 def main() -> int:
+    global SUITE, LOG_ROOT, FIG
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--suite', default=SUITE)
+    a = ap.parse_args()
+    SUITE = a.suite
+    LOG_ROOT = ROOT / 'logs' / f'{SUITE}-lrsweep'
+    FIG = ROOT / 'figures' / f'{SUITE}-lrsweep.png'
     data = parse()
     if not data:
         print("no sweep logs parsed yet")

@@ -80,7 +80,16 @@ MICRO_BATCH = {
 # Half-decade grid. Published anchors put the optimum near 1e-3 at d=512 and
 # 3e-4 at d=1024, so both sit interior with a half-decade of margin. An argmin
 # on a grid EDGE is not a result, it is an instruction to sweep again.
-LR_GRID = [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+LR_GRID = [1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2]
+# 3e-2 was added after the wd=0 sweep. Removing the compartment embedding moved
+# the R1-c8 optimum from 3e-3 to 1e-2 -- the top of the old grid -- measured at
+# a matched pre-decay step (the runs died to a node-wide CUDA launch failure at
+# 90%, so the post-decay eval was lost; for compemb=ON that step ranks the LRs
+# identically to the post-decay eval, so it is a trustworthy proxy). An argmin
+# on a grid EDGE is not a result. One extra point costs ~60 GPU-hours; a
+# re-sweep forced by an edge argmin costs 125+, so the point pays for itself.
+# The grid stays IDENTICAL across every rung and arm -- unequal search effort,
+# not unequal LR values, is what actually breaks a tuning comparison.
 
 # Which arms to sweep at which rung.
 #
@@ -109,6 +118,34 @@ LADDER_TOKENS = 30_000_000_000
 LADDER_BRANCH_AT = [27_000_000_000]   # branch point for a 30B anneal
 
 PLACEHOLDER_LR = 4e-4            # overwritten once the sweep lands
+
+# ---- recipe knobs -------------------------------------------------------
+#
+# Defaults reproduce the ORIGINAL v2 sweep byte-for-byte (wd=0, compartment
+# embeddings on), so regenerating never disturbs runs already on disk.
+#
+# The FINAL recipe overrides both:
+#
+#   --suite ladder-v2-final --weight-decay 0.1 --no-compartment-embeddings
+#
+# weight_decay 0.1 is the modal published value -- GPT-3, OLMo, Llama and
+# SmolLM2 all use it (Pythia is the outlier at 0.01). Excluding only biases and
+# norms from decay, which configure_optimizers already does via `dim() >= 2`,
+# is the universal convention. Excluding EMBEDDINGS as well was considered and
+# rejected: the mechanistic case for it is weak in a pre-LN transformer, where
+# ln_1/ln_f normalise away the scale that decay changes, and there is no
+# citation solid enough to defend the deviation with.
+#
+# use_compartment_embeddings false: the ladder carries no explicit source
+# indicator. With vocabulary expansion the compartment is already in-band --
+# token t in compartment i IS a distinct id, t + i*V -- so the additive
+# compartment vector is redundant information. It is also DIFFERENTIAL across
+# the arms (eight distinct vectors doing real work at c=8; one constant vector
+# the model absorbs trivially at c=1), which is the one class of effect this
+# design cannot absorb.
+WEIGHT_DECAY = 0.0
+USE_COMPARTMENT_EMBEDDINGS = True
+SUITE = "ladder-v2"
 
 
 # ---------------------------------------------------------------- helpers
@@ -260,7 +297,7 @@ full_state_at_tokens = [{branch_line}]
 
 [optimizer]
 learning_rate = {lr:.6g}
-weight_decay = 0
+weight_decay = {WEIGHT_DECAY:g}
 
 [lr]
 schedule = "wsd"
@@ -287,7 +324,7 @@ compartment_scaling = "equal"
 translation_ratio = 0
 max_compartments = 16
 assignment_horizon_examples = {ASSIGNMENT_HORIZON}
-use_compartment_embeddings = true
+use_compartment_embeddings = {"true" if USE_COMPARTMENT_EMBEDDINGS else "false"}
 translation_mode = "standard"
 translation_chunk_size = 4
 """
@@ -303,11 +340,21 @@ def _rung_of(n_embd: int) -> str:
 # ---------------------------------------------------------------- main
 
 def main() -> None:
+    global SUITE, WEIGHT_DECAY, USE_COMPARTMENT_EMBEDDINGS
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="config/ladder-v2")
+    ap.add_argument("--out", default=None,
+                    help="output dir; defaults to config/<suite>")
+    ap.add_argument("--suite", default=SUITE,
+                    help="name prefix + config dir, e.g. ladder-v2-final")
+    ap.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY)
+    ap.add_argument("--no-compartment-embeddings", action="store_true",
+                    help="emit use_compartment_embeddings = false")
     args = ap.parse_args()
 
-    out = pathlib.Path(args.out)
+    SUITE = args.suite
+    WEIGHT_DECAY = args.weight_decay
+    USE_COMPARTMENT_EMBEDDINGS = not args.no_compartment_embeddings
+    out = pathlib.Path(args.out or f'config/{SUITE}')
     out.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
 
@@ -319,7 +366,7 @@ def main() -> None:
         for arm in LRSWEEP_ARMS[rung]:
             for lr in LR_GRID:
                 tag = f"{lr:.0e}".replace("e-0", "e-")
-                name = f"ladder-v2-lrsweep-{rung.lower()}-{arm}-lr{tag}"
+                name = f"{SUITE}-lrsweep-{rung.lower()}-{arm}-lr{tag}"
                 text = render(
                     name=name,
                     header=(
@@ -331,7 +378,7 @@ def main() -> None:
                     arm=arm,
                     lr=lr,
                     tokens=LRSWEEP_TOKENS,
-                    group="ladder-v2-lrsweep",
+                    group=f"{SUITE}-lrsweep",
                     decay=True,          # complete miniature of the real recipe
                 )
                 (out / f"{name}.toml").write_text(text)
@@ -340,7 +387,7 @@ def main() -> None:
     # ---- the ladder itself
     for rung, n_layer, n_embd in RUNGS:
         for arm in ("c1", "c8", "c1-padded"):
-            name = f"ladder-v2-{rung.lower()}-{arm}"
+            name = f"{SUITE}-{rung.lower()}-{arm}"
             text = render(
                 name=name,
                 header=(
@@ -352,7 +399,7 @@ def main() -> None:
                 arm=arm,
                 lr=PLACEHOLDER_LR,
                 tokens=LADDER_TOKENS,
-                group="ladder-v2",
+                group=SUITE,
                 decay=False,             # stable trajectory; anneals fork off it
                 branch_at=LADDER_BRANCH_AT,
             )
