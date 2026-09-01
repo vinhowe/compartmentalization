@@ -34,7 +34,7 @@ gradient_accumulation_steps = 64
 # tokens-per-optimizer-step out from under an exact token budget.
 auto_batch_config = false
 eval_interval = 250
-eval_iters = 20
+eval_iters = 64
 log_interval = 10
 always_save_checkpoint = true
 seed = 1024

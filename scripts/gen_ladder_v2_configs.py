@@ -117,6 +117,24 @@ LRSWEEP_TOKENS = 3_000_000_000
 LADDER_TOKENS = 30_000_000_000
 LADDER_BRANCH_AT = [27_000_000_000]   # branch point for a 30B anneal
 
+EVAL_SEQUENCES = 2048            # held CONSTANT across arms -- see below
+
+# eval_iters is DERIVED as EVAL_SEQUENCES // batch_size, never fixed.
+#
+# train.py builds val_loader with the TRAINING batch_size and reads exactly
+# eval_iters batches from it, so a fixed eval_iters makes the evaluated token
+# count -- and the evaluated DATA -- depend on the arm's micro-batch. At
+# eval_iters=20 that meant c1 saw 1280 val sequences at R1 while c8 saw 320: not
+# merely a smaller sample but a strict SUBSET, so L(c8) - L(c1) mixed a model
+# difference with a sampling difference. Worse, the ratio varied by rung (4x at
+# R1, 2x at R6), which would impart a spurious trend into the very scaling fit
+# the ladder exists to produce.
+#
+# Holding sequences constant makes every arm evaluate on the identical first
+# 2048 val sequences (2.1M tokens, one training batch worth). val_loader.reset()
+# before each eval already guarantees determinism, so this makes the comparison
+# genuinely paired rather than only appearing to be.
+
 PLACEHOLDER_LR = 4e-4            # overwritten once the sweep lands
 
 # ---- recipe knobs -------------------------------------------------------
@@ -226,6 +244,10 @@ def render(
     composite = vocab_size * n_comp + 1
     wide = composite > BASE_VOCAB + 1
     micro, accum = batch_for(_rung_of(n_embd), wide)
+    eval_it = EVAL_SEQUENCES // micro
+    assert eval_it * micro == EVAL_SEQUENCES, (
+        f'micro-batch {micro} must divide EVAL_SEQUENCES {EVAL_SEQUENCES} '
+        'so every arm evaluates on exactly the same sequences')
     max_iters = iters_for(tokens)
     n_head = n_embd // 64          # d_head fixed at 64
 
@@ -288,7 +310,7 @@ gradient_accumulation_steps = {accum}
 # tokens-per-optimizer-step out from under an exact token budget.
 auto_batch_config = false
 eval_interval = {eval_iv}
-eval_iters = 20
+eval_iters = {eval_it}
 log_interval = 10
 always_save_checkpoint = true
 seed = {SEED}

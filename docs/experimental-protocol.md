@@ -452,7 +452,7 @@ extend to a full cross if the effect is present.
 
 - **Never use training-time `val loss` from `.multirun/*.log` for cross-model
   comparisons when `tr > 0`.** Always go through the formal
-  `fineweb_val_metrics.json` pipeline. The only exception is InfoNCE charts at
+  `val_metrics.json` pipeline. The only exception is InfoNCE charts at
   `tr = 0`.
 - Report **bits-per-byte** alongside nats-per-token wherever a future tokenizer
   change could invalidate the number.
