@@ -31,6 +31,9 @@ class ConfigManager:
         self.config_cls = config_cls
         self.config: JobConfig = config_cls()
         self.register_tyro_rules(custom_registry)
+        # Set per-load from the config's declared version. v2 configs REJECT an
+        # unknown key; v1 configs keep warning. See _dict_to_dataclass.
+        self._strict_unknown_keys = False
 
     def parse_args(self, args: list[str] | None = None) -> JobConfig:
         if args is None:
@@ -60,6 +63,8 @@ class ConfigManager:
         # Version adapter. v1 (no config_version) is converted to v2 semantics
         # in memory so the rest of the code implements exactly one set of rules;
         # v2 rejects fields it is not allowed to set. See src/config/versioning.py.
+        self._strict_unknown_keys = (
+            versioning.config_version(data) >= versioning.CURRENT_VERSION)
         data = versioning.normalize(data)
         base_config = self._dict_to_dataclass(self.config_cls, data)
         self.config = base_config
@@ -117,6 +122,7 @@ class ConfigManager:
         # untouched; only configs that opt in by declaring config_version >= 2
         # get the adapter.
         if versioning.config_version(data) >= versioning.CURRENT_VERSION:
+            self._strict_unknown_keys = True
             data = versioning.normalize(data)
         return data
 
@@ -132,15 +138,38 @@ class ConfigManager:
         known = {f.name for f in fields(cls)}
         unknown = sorted(set(data) - known)
         if unknown:
-            # Warn rather than raise: 115 of 226 existing configs carry
-            # `always_save_checkpoints` (typo'd plural), harmless only because
-            # the real field defaults to True. Failing them would break the
-            # archive to fix a typo. New configs should be read for this
-            # warning before they are trusted.
+            # v1 WARNS, v2 RAISES.
+            #
+            # Warning was the original choice because 115 of 226 archived
+            # configs carry `always_save_checkpoints` (typo'd plural), harmless
+            # only because the real field defaults to True; failing them would
+            # break the archive to fix a typo. That reasoning still holds for
+            # v1 and those configs keep loading unchanged.
+            #
+            # It does NOT hold for new configs, and the cost of treating it as
+            # advisory has now been paid: redesign-1b-lr4e-4-c8-100b-sharedout
+            # set `shared_output_vocab`, a field that exists nowhere in the
+            # codebase. It was dropped with a warning, the run resolved
+            # byte-identically to the plain c=8 arm, and ~693 A100-hours went
+            # into a duplicate of a baseline instead of the ablation the run was
+            # named for. A warning printed once into a 100B run's log is not a
+            # guard; nobody reads it.
+            #
+            # v2's premise is "reject rather than ignore". This makes that true
+            # of every field, not just the four names versioning.py removes.
+            msg = (
+                f"unknown key(s) in [{cls.__name__.lower()}]: "
+                f"{', '.join(unknown)}. Did you mean one of: "
+                f"{', '.join(sorted(known))}?"
+            )
+            if self._strict_unknown_keys:
+                raise ValueError(
+                    f"config_version >= {versioning.CURRENT_VERSION} rejects "
+                    f"{msg}\nA field the code does not implement reads as a "
+                    f"deliberate choice in the config and is not one."
+                )
             print(
-                f"WARNING: ignoring unknown key(s) in [{cls.__name__.lower()}]: "
-                f"{', '.join(unknown)} -- these fields keep their DEFAULTS. "
-                f"Did you mean one of: {', '.join(sorted(known))}?",
+                f"WARNING: ignoring {msg} -- these fields keep their DEFAULTS.",
                 file=sys.stderr,
             )
 

@@ -141,5 +141,79 @@ class LadderV2ConfigsAreV2(unittest.TestCase):
                 self.assertFalse(cfg.training.auto_batch_config)
 
 
+class UnknownKeysAreFatalUnderV2(unittest.TestCase):
+    """v2 rejects a field the code does not implement; v1 still only warns.
+
+    redesign-1b-lr4e-4-c8-100b-sharedout set `shared_output_vocab`, which exists
+    nowhere in the codebase. It was dropped with a warning, the config resolved
+    byte-identically to the plain c=8 arm, and ~693 A100-hours produced a
+    duplicate of a baseline instead of the ablation the run was named for.
+
+    The warning is kept for v1 because 115 of 226 archived configs carry the
+    typo `always_save_checkpoints`, and failing them would break the archive.
+    """
+
+    V2_BAD = """\
+config_version = 2
+
+[model]
+n_layer = 4
+n_embd = 512
+n_head = 8
+vocab_size = 16384
+
+[experiment]
+n_compartments = 8
+max_compartments = 16
+shared_output_vocab = true
+"""
+    V1_BAD = V2_BAD.replace("config_version = 2\n", "")
+
+    def test_v2_rejects_unknown_key_via_parse_args(self):
+        with self.assertRaises(ValueError) as ctx:
+            ConfigManager().parse_args(["--job.config-file", _write(self.V2_BAD)])
+        self.assertIn("shared_output_vocab", str(ctx.exception))
+
+    def test_v2_rejects_unknown_key_via_load_from_toml_file(self):
+        with self.assertRaises(ValueError) as ctx:
+            ConfigManager().load_from_toml_file(_write(self.V2_BAD))
+        self.assertIn("shared_output_vocab", str(ctx.exception))
+
+    def test_v1_still_loads_with_only_a_warning(self):
+        cfg = ConfigManager().parse_args(["--job.config-file", _write(self.V1_BAD)])
+        self.assertEqual(cfg.experiment.n_compartments, 8)
+
+    def test_the_strict_rule_breaks_nothing_in_the_archive(self):
+        """No archived config may fail BECAUSE of the strict unknown-key rule.
+
+        Asserting zero failures would be wrong: two configs are independently
+        broken and were before this change -- 1b-multilingual-en-only-qwen3.toml
+        is malformed TOML, and fineweb-vanilla.toml omits a required field. The
+        property that matters is narrower and is the one this rule could
+        plausibly violate: nothing in the archive is rejected for an unknown key.
+        """
+        import contextlib
+        import io
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        cfgs = sorted((root / "config").glob("*.toml"))
+        if not cfgs:
+            self.skipTest("no configs")
+        rejected_for_unknown_key = []
+        for c in cfgs:
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    ConfigManager().parse_args(["--job.config-file", str(c)])
+            except ValueError as e:
+                if "unknown key" in str(e):
+                    rejected_for_unknown_key.append(f"{c.name}: {str(e)[:90]}")
+            except Exception:
+                pass  # pre-existing breakage, not this rule's business
+        self.assertEqual(
+            rejected_for_unknown_key, [],
+            "the strict rule rejected archived config(s):\n" +
+            "\n".join(rejected_for_unknown_key[:10]))
+
+
 if __name__ == "__main__":
     unittest.main()
