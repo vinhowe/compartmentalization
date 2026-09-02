@@ -71,5 +71,7 @@ translation_ratio = 0
 max_compartments = 16
 assignment_horizon_examples = 292968448
 use_compartment_embeddings = false
+copy_compartment_embeddings = false
+copy_compartment_lm_head = false
 translation_mode = "standard"
 translation_chunk_size = 4

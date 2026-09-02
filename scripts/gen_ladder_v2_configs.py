@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 
 # ---------------------------------------------------------------- constants
 
@@ -209,6 +210,39 @@ USE_COMPARTMENT_EMBEDDINGS = True
 SUITE = "ladder-v2"
 
 
+# Named plans. A plan is {rung: [arm, ...]}; the default reproduces the
+# original 18-run ladder exactly.
+#
+# p1 is the phase-1 grid: the full c-sweep at the four rungs that fit on ONE
+# GPU (R4-c8 is 77h, R5-c8 is 157h), plus two things that belong at a rung
+# whose numbers we would actually quote rather than at the cheapest rung --
+#
+#   the padded series at R4, because at R1 the model is 91% embedding table at
+#   c=8 and the parameter effect measured there is an extreme, not a
+#   representative value; at R4 it is 73%.
+#
+#   init-copy at R4 for the same reason, and only ONE of them: whether a model
+#   initialised perfectly unified STAYS unified is plausibly a qualitative
+#   answer, and six points buy nothing if it is. If the effect turns out to be
+#   graded, the curve can be filled in afterwards.
+#
+# R5/R6 are deliberately absent: they need 8-way DDP and belong on ORC.
+PLANS = {
+    "ladder": {r: ["c1", "c8", "c1-padded"] for r, _, _ in RUNGS},
+    "p1": {
+        "R1": ["c1", "c2", "c4", "c6", "c8"],
+        "R2": ["c1", "c2", "c4", "c6", "c8"],
+        "R3": ["c1", "c2", "c4", "c6", "c8"],
+        "R4": ["c1", "c2", "c4", "c6", "c8",
+               "c1-padded2", "c1-padded4", "c1-padded6", "c1-padded8",
+               "c8-initcopy"],
+    },
+    "p2": {   # ORC, 8-way DDP
+        "R5": ["c1", "c8"],
+        "R6": ["c1", "c8"],
+    },
+}
+
 # ---------------------------------------------------------------- helpers
 
 def iters_for(tokens: int) -> int:
@@ -247,6 +281,27 @@ def eval_interval_for(max_iters: int, target: int) -> int:
     return best
 
 
+def micro_for(rung: str, rows: int) -> int:
+    """Micro-batch for an arm with `rows` vocabulary entries.
+
+    The binding memory cost at the head is the logit tensor, which is
+    rows * T * (2 bf16 + 4 fp32-CE-upcast + 2 grad) bytes per sequence -- linear
+    in rows and independent of width. So hold (micro-batch x rows) at the value
+    already measured safe for the c=8 arm, and cap at the arm's narrow-vocab
+    value so a small-vocab arm never exceeds what c=1 was verified at.
+
+    Powers of two only: micro-batch must divide 2048 exactly, or the arm stops
+    training on 2048 sequences per optimizer step and its token budget silently
+    stops matching every other arm's.
+    """
+    narrow, wide = MICRO_BATCH[rung]
+    budget = wide * (BASE_VOCAB * C_TREAT + 1)
+    m = narrow
+    while m > 1 and m * rows > budget:
+        m //= 2
+    return m
+
+
 def batch_for(rung: str, wide_vocab: bool) -> tuple[int, int]:
     micro = MICRO_BATCH[rung][1 if wide_vocab else 0]
     accum = 2048 // micro
@@ -259,15 +314,36 @@ def batch_for(rung: str, wide_vocab: bool) -> tuple[int, int]:
 
 
 def arm_vocab(arm: str) -> tuple[int, int]:
-    """(model.vocab_size, experiment.n_compartments) for an arm name."""
-    if arm == "c1":
-        return BASE_VOCAB, 1
-    if arm == "c8":
-        return BASE_VOCAB, C_TREAT
-    if arm == "c1-padded":
-        # composite = 131072*1 + 1 = 131073, exactly matching c8
-        return BASE_VOCAB * C_TREAT, 1
+    """(model.vocab_size, experiment.n_compartments) for an arm name.
+
+    Three families, all resolving through composite = vocab_size * n_comp + 1:
+
+      c<N>              compartmentalized:  16384 x N + 1 rows, N compartments
+      c1-padded<N>      parameter-matched control for c<N>: the SAME row count,
+                        but ONE compartment -- the rows exist and are trained,
+                        there is simply nothing to compartmentalize. This is
+                        what separates "more parameters" from "compartments".
+      c<N>-initcopy     c<N>, but every compartment's embedding and lm_head rows
+                        are INITIALISED IDENTICALLY (copy_compartment_*). The
+                        model starts perfectly unified; whether it stays that
+                        way is the question. A best-case bound on the cost of
+                        the source-identification requirement.
+
+    `c1-padded` without a number stays a synonym for `c1-padded8`, so already
+    generated configs regenerate byte-identically.
+    """
+    m = re.fullmatch(r"c1-padded(\d*)", arm)
+    if m:
+        n = int(m.group(1) or C_TREAT)
+        return BASE_VOCAB * n, 1
+    m = re.fullmatch(r"c(\d+)(-initcopy)?", arm)
+    if m:
+        return BASE_VOCAB, int(m.group(1))
     raise ValueError(f"unknown arm {arm!r}")
+
+
+def arm_is_initcopy(arm: str) -> bool:
+    return arm.endswith("-initcopy")
 
 
 def render(
@@ -285,8 +361,11 @@ def render(
 ) -> str:
     vocab_size, n_comp = arm_vocab(arm)
     composite = vocab_size * n_comp + 1
-    wide = composite > BASE_VOCAB + 1
-    micro, accum = batch_for(_rung_of(n_embd), wide)
+    micro = micro_for(_rung_of(n_embd), composite)
+    accum = 2048 // micro
+    assert micro * accum == 2048, f"micro {micro} must divide 2048"
+    assert accum % WORLD_SIZE == 0 or accum < WORLD_SIZE, (
+        f"grad_accum {accum} must be divisible by world size {WORLD_SIZE}")
     eval_it = EVAL_SEQUENCES // micro
     assert eval_it * micro == EVAL_SEQUENCES, (
         f'micro-batch {micro} must divide EVAL_SEQUENCES {EVAL_SEQUENCES} '
@@ -390,6 +469,8 @@ translation_ratio = 0
 max_compartments = 16
 assignment_horizon_examples = {ASSIGNMENT_HORIZON}
 use_compartment_embeddings = {"true" if USE_COMPARTMENT_EMBEDDINGS else "false"}
+copy_compartment_embeddings = {"true" if arm_is_initcopy(arm) else "false"}
+copy_compartment_lm_head = {"true" if arm_is_initcopy(arm) else "false"}
 translation_mode = "standard"
 translation_chunk_size = 4
 """
@@ -409,6 +490,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=None,
                     help="output dir; defaults to config/<suite>")
+    ap.add_argument("--plan", default="ladder", choices=sorted(PLANS),
+                    help="which rung/arm grid to emit")
     ap.add_argument("--suite", default=SUITE,
                     help="name prefix + config dir, e.g. ladder-v2-final")
     ap.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY)
@@ -450,8 +533,9 @@ def main() -> None:
                 written.append(name)
 
     # ---- the ladder itself
+    plan = PLANS[args.plan]
     for rung, n_layer, n_embd in RUNGS:
-        for arm in ("c1", "c8", "c1-padded"):
+        for arm in plan.get(rung, []):
             name = f"{SUITE}-{rung.lower()}-{arm}"
             text = render(
                 name=name,

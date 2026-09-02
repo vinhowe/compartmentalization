@@ -68,7 +68,7 @@ def main() -> int:
 
     # one config per (rung, arm) -- the sweep arms share geometry with the ladder
     files = sorted(
-        p for p in pathlib.Path(args.config_dir).glob("ladder-v2-r*.toml")
+        p for p in pathlib.Path(args.config_dir).glob("*.toml")
         if "lrsweep" not in p.name
     )
     if args.only:
