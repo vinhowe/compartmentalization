@@ -135,7 +135,50 @@ EVAL_SEQUENCES = 2048            # held CONSTANT across arms -- see below
 # before each eval already guarantees determinism, so this makes the comparison
 # genuinely paired rather than only appearing to be.
 
-PLACEHOLDER_LR = 4e-4            # overwritten once the sweep lands
+# Learning rate per rung, from PUBLISHED PRACTICE rather than from our own
+# argmin. A power law fit to the Pythia LR schedule (Biderman et al. 2023 Tab.1,
+# which explicitly adopts GPT-3's Brown et al. 2020 Tab.2.1),
+#
+#     log10 LR = 0.171 - 0.415 * log10(N_total)      rms 0.070 decades
+#
+# evaluated at each rung's TOTAL parameter count at c=1 -- total, because that
+# is how both published tables report size. (The power-law FIT of the loss gap
+# still uses trunk N; that is a different quantity for a different purpose.)
+#
+# Why the published rule and not our sweep's argmin: our 42-run sweep tunes at
+# 3B tokens for a ladder that trains to 30B. A short horizon systematically
+# favours a higher LR, and indeed our sweep returns a FLAT optimum of 1e-3 at
+# every width, against a published exponent of -0.31 (GPT-3) to -0.41 (Pythia).
+# A flat rule is the signature of the tuning budget, not a property of the
+# models. Pythia is also exactly this design -- one fixed token budget across a
+# ladder -- and is the reference class the paper wants to sit in.
+#
+# Our sweep CONFIRMS the rule where it measured: R1 and R3 argmins are 1e-3
+# against predictions of 1.2e-3 and 8.3e-4, and R4's two statistically tied
+# values (3e-4 and 1e-3, 0.0005 nats apart) bracket the predicted 6.3e-4. R6 is
+# corroborated three ways: this fit gives 2.9e-4, Pythia-1B used 3e-4, OLMo-1B
+# used 4e-4, and our own 16x2048 runs on ORC trained stably to 100B at 4e-4.
+#
+# muP was considered and rejected: it indexes its rules by WIDTH, while
+# compartmentalization multiplies the VOCABULARY, so it prescribes nothing for
+# the layer that is 73-91% of the c=8 model and IS the manipulation under test.
+# It is also the minority choice in open releases -- Pythia, OLMo, Llama and
+# SmolLM2 all use standard parametrization with a size-dependent LR.
+LADDER_LR = {
+    "R1": 1.2e-3,   # 29.4M total   (Pythia-70M used 1.0e-3)
+    "R2": 9.8e-4,   # 45.6M
+    "R3": 8.3e-4,   # 67.6M
+    "R4": 6.3e-4,   # 134.2M        (Pythia-160M used 6.0e-4)
+    "R5": 4.0e-4,   # 390.1M        (Pythia-410M used 3.0e-4)
+    "R6": 2.9e-4,   # 872.4M        (Pythia-1B used 3.0e-4, OLMo-1B 4.0e-4)
+}
+
+# One LR per RUNG, shared by all three arms. The sweep's single strongest result
+# is that the optimum does not move with c -- identical at R1 and R3, and a
+# 0.0005-nat tie at R4 -- so a per-arm LR would add tuning noise to the very
+# difference being measured, for no measured benefit.
+
+PLACEHOLDER_LR = 4e-4            # sweep arms only; the ladder uses LADDER_LR
 
 # ---- recipe knobs -------------------------------------------------------
 #
@@ -414,12 +457,12 @@ def main() -> None:
                 name=name,
                 header=(
                     f"Scaling ladder {rung} ({n_layer}x{n_embd}), arm {arm}. "
-                    f"learning_rate is a PLACEHOLDER until the LR sweep lands."
+                    f"lr={LADDER_LR[rung]:g}, from the Pythia size schedule."
                 ),
                 n_layer=n_layer,
                 n_embd=n_embd,
                 arm=arm,
-                lr=PLACEHOLDER_LR,
+                lr=LADDER_LR[rung],
                 tokens=LADDER_TOKENS,
                 group=SUITE,
                 decay=False,             # stable trajectory; anneals fork off it

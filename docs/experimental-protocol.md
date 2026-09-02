@@ -150,6 +150,64 @@ and a different effective step size.
 Agreement retires the objection in one sentence. Disagreement means part of the
 measured gap is a tuning artifact, which must be known before it is published.
 
+### The rule the ladder actually uses: the Pythia size schedule
+
+**The ladder's learning rate comes from published practice, not from our own
+argmin.** A power law fit to the Pythia schedule (Biderman et al. 2023 Tab. 1,
+which explicitly adopts GPT-3's Brown et al. 2020 Tab. 2.1):
+
+```
+log10 LR = 0.171 - 0.415 * log10(N_total)        rms 0.070 decades
+```
+
+evaluated at each rung's TOTAL parameter count at c=1 -- total, because that is
+how both published tables report size. Note this is a different quantity from
+the one the loss-gap power law is fit against, which remains trunk N.
+
+| rung | total N (c=1) | LR | nearest published |
+|------|--------------|-----|-------------------|
+| R1 | 29.4M  | 1.2e-3 | Pythia-70M  1.0e-3 |
+| R2 | 45.6M  | 9.8e-4 | -- |
+| R3 | 67.6M  | 8.3e-4 | Pythia-70M  1.0e-3 |
+| R4 | 134.2M | 6.3e-4 | Pythia-160M 6.0e-4 |
+| R5 | 390.1M | 4.0e-4 | Pythia-410M 3.0e-4 |
+| R6 | 872.4M | 2.9e-4 | Pythia-1B   3.0e-4 |
+
+**One LR per rung, shared by all three arms.** The sweep's strongest single
+result is that the optimum does not move with c: identical at R1 and R3, and a
+0.0005-nat tie at R4. A per-arm LR would inject tuning noise into the very
+difference being measured, for no measured benefit. It also makes the headline
+comparison matched-LR by construction.
+
+**Why the published rule rather than our measured argmin.** The sweep tunes at
+3B tokens for a ladder that trains to 30B. A short horizon systematically
+prefers a higher LR, and our sweep duly returns a FLAT optimum of 1e-3 at every
+width -- against a published exponent of -0.31 (GPT-3) to -0.41 (Pythia). A
+flat rule is the signature of the tuning budget, not a property of the models.
+Pythia is also exactly this design (one fixed token budget across a ladder) and
+is the reference class the paper wants to sit in.
+
+The sweep is not wasted: it CONFIRMS the rule where it measured. R1 and R3
+argmins are 1e-3 against predicted 1.2e-3 and 8.3e-4; R4's two statistically
+tied values, 3e-4 and 1e-3 at 0.0005 nats apart, bracket the predicted 6.3e-4.
+It also establishes the c-invariance the shared-LR choice rests on, and shows
+the gap is identical at flat LR and at per-cell optima (0.4945/0.6040/0.5008
+versus 0.4945/0.6040/0.5013) -- which retires the tuning-artifact objection
+directly.
+
+R6 is corroborated three ways: this fit gives 2.9e-4, Pythia-1B used 3.0e-4,
+OLMo-1B used 4.0e-4, and our own 16x2048 runs on ORC trained stably to 100B at
+4.0e-4.
+
+**muP was considered and rejected.** It indexes its scaling rules by WIDTH,
+while compartmentalization multiplies the VOCABULARY; it therefore prescribes
+nothing for the layer that is 73-91% of the c=8 model and that IS the
+manipulation under test. Adopting it would import untested scaling assumptions
+onto the experimental axis. It is also the minority choice in open releases --
+Pythia, OLMo, Llama and SmolLM2 all use standard parametrization with a
+size-dependent LR, and those are the models this work wants to be compared
+against. Cerebras-GPT and MiniCPM are the notable muP adopters.
+
 ### Picking the grid
 
 You do not pick an LR. You pick a bracket wide enough that the argmin lands
