@@ -1,0 +1,77 @@
+# Weight-tied variant of the paper's n=8 marquee comp fineweb 8-512 run.
+# Source: meta/config.json of run
+#   bpe16384-rope-8-512-sweep/2026-04-27T22-12-00Z__8-512-n8-tr01__a7ddefbd__s64__fd9c538__198f3d6b
+# (paper Figure 6, RUNS_8_512_LEGACY_BY_C[8]). Identical to that config in every
+# field EXCEPT model.weight_tying flipped false -> true. Preserves:
+#   weight_decay = 0, decay_lr = false, translation_ratio_mode = "compartment",
+#   translation_ratio = 0.1 (effective tr = 0.1/(8+1) ≈ 0.011),
+#   n_compartments = 8, seed = 64, max_iters = 1_000_000.
+#
+# Absolute data paths so the pool workflow (cwd = TC_STORAGE_ROOT) can find them.
+
+[data]
+train_bin = "/grphome/grp_pccl/vin/dev/translation-compression/data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "/grphome/grp_pccl/vin/dev/translation-compression/data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+uniform_seed = 64
+
+[model]
+# size_tier omitted — ORC's presets.py TIER_SPECS doesn't have "8-512" (has up
+# to 8-256). n_layer/n_head/n_embd set explicitly below, and batch_size /
+# gradient_accumulation_steps set explicitly in [training], so apply_size_tier
+# is a no-op we don't need.
+n_layer = 8
+n_head = 16
+n_embd = 512
+block_size = 64
+vocab_size = 16384
+weight_tying = true
+use_rope = true
+rope_base = 10000.0
+dropout = 0.0
+bias = false
+
+[training]
+max_iters = 1000000
+batch_size = 128
+gradient_accumulation_steps = 16
+eval_interval = 10000
+eval_iters = 1
+log_interval = 10
+always_save_checkpoint = true
+seed = 64
+
+[optimizer]
+learning_rate = 2e-5
+weight_decay = 0
+beta1 = 0.9
+beta2 = 0.999
+grad_clip = 1.0
+
+[lr]
+warmup_iters = 1000
+decay_lr = false
+lr_decay_iters = 600000
+min_lr = 6e-05
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "8-512-n8-tr01-tied"
+wandb_group = "weight-tying-ablation"
+
+[experiment]
+n_compartments = 8
+compartment_scaling = "equal"
+translation_ratio = 0.1
+translation_ratio_mode = "compartment"
+assignment_seed = 64
+max_compartments = 16
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = true
+translation_mode = "standard"
+translation_chunk_size = 4

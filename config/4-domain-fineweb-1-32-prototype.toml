@@ -1,0 +1,46 @@
+[data]
+train_bin = "data/fineweb350B-dedup/fineweb_train_*.bin"
+val_bin = "data/fineweb350B-dedup/fineweb_val_*.bin"
+# train_bin = "data/random_V2048_L64_N2048000000_seed64/random_train_*.bin"
+
+[model]
+n_layer = 1
+n_head = 8
+n_embd = 32
+block_size = 64
+vocab_size = 50257
+weight_tying = false
+
+[training]
+max_iters = 1e6
+batch_size = 512
+gradient_accumulation_steps = 4
+eval_interval = 500
+always_save_checkpoints = true
+eval_iters = 1
+seed = 64
+
+[optimizer]
+learning_rate = 6e-4
+# So adamw = adam
+weight_decay = 0
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "4-domain-fineweb-1-32-prototype"
+wandb_notes = "4 domain on FineWeb"
+wandb_group = "small-multi-domain-prototypes"
+log_interval = 10
+
+[experiment]
+weights = { "0" = 1.0, "1" = 1.0, "2" = 1.0, "3" = 1.0 }
+max_compartments = 4
+assignment_seed = 64
+shared_token_embeddings = true
+use_compartment_embeddings = true
+copy_compartment_lm_head = true

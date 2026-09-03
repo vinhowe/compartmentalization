@@ -1,0 +1,30 @@
+#!/bin/bash
+# slogs - tail all logs from running Slurm jobs with lnav
+# Usage: slogs [err|out|both]  (default: err)
+
+set -euo pipefail
+
+LOGDIR="/grphome/grp_pccl/vin/dev/translation-compression/logs"
+MODE="${1:-err}"
+
+# Get all running job IDs (expand array notation)
+JOBIDS=$(squeue --me --noheader -o "%i" --states=RUNNING 2>/dev/null | sed 's/_/\n/; s/\[.*//')
+
+# Collect matching log files
+FILES=()
+while IFS= read -r jobid; do
+    [[ -z "$jobid" ]] && continue
+    case "$MODE" in
+        err)  for f in "$LOGDIR"/*-${jobid}*.err; do [[ -f "$f" ]] && FILES+=("$f"); done ;;
+        out)  for f in "$LOGDIR"/*-${jobid}*.out; do [[ -f "$f" ]] && FILES+=("$f"); done ;;
+        both) for f in "$LOGDIR"/*-${jobid}*.err "$LOGDIR"/*-${jobid}*.out; do [[ -f "$f" ]] && FILES+=("$f"); done ;;
+    esac
+done < <(squeue --me --noheader -o "%F" --states=RUNNING 2>/dev/null | sort -u)
+
+if [[ ${#FILES[@]} -eq 0 ]]; then
+    echo "No log files found for running jobs."
+    exit 1
+fi
+
+echo "Opening ${#FILES[@]} log files..."
+~/.local/bin/lnav "${FILES[@]}"

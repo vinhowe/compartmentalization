@@ -1,0 +1,81 @@
+# Parameter-matched control for the bio+QA capacity claim.
+#
+# WHY. Reviewers aQVL (W4) and tHG3 both raise the same confound: a
+# compartmented model has a c-times larger embedding/output matrix, so any
+# measured cost might just be the price of optimising a bigger vocabulary rather
+# than compartmentalisation itself. The bio+QA pair currently compares
+#
+#   shared tokenizer   V = 50,257   ~35.2M params   (the ~18.8% condition)
+#   compartmented     2V = 100,514  ~60.9M params
+#
+# which differ in BOTH the thing under study and total parameter count.
+#
+# THIS RUN removes the confound: identical 2V embedding table and identical
+# parameter count as the compartmented model, but trained on the SHARED data,
+# so the upper 50,257 rows never receive gradient and stay at initialisation.
+# Same "dead rows" device already validated in 8-256-n8-deadwt-c1-1M.
+#
+# READING IT. If this still lands near the shared condition's ~18.8%, the
+# capacity/destructive result survives at matched parameters and the confound is
+# answered. If it instead moves toward the compartmented number, the effect was
+# substantially the embedding matrix and the claim needs weakening.
+#
+# Everything except train_bin and the run name is copied verbatim from
+# bio-cap-split-comp-N15000-block.toml so the comparison is clean.
+
+[data]
+# SHARED data (not the -comp- variant): every token lands in the first V rows.
+train_bin = "data/bio-cap-split-N15000-K10-T8-block/bio_train_*.bin"
+val_bin = ""
+
+[model]
+n_layer = 12
+n_embd = 256
+n_head = 8
+block_size = 512
+# 2V, matching the compartmented model. The upper half is deliberately dead.
+vocab_size = 100514
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 45000
+batch_size = 32
+gradient_accumulation_steps = 8
+eval_interval = 500
+eval_iters = 0
+log_interval = 10
+always_save_checkpoints = true
+seed = 64
+
+[optimizer]
+learning_rate = 3e-4
+weight_decay = 0.0
+
+[lr]
+decay_lr = true
+warmup_iters = 1000
+lr_decay_iters = 45000
+min_lr = 3e-5
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "bio-cap-split-deadrows-N15000-block"
+wandb_group = "bio-capacity"
+wandb_notes = "parameter-matched control: 2V table, shared data, upper V rows dead"
+
+[experiment]
+n_compartments = 1
+compartment_scaling = "equal"
+translation_ratio = 0
+translation_ratio_mode = "absolute"
+max_compartments = 16
+use_compartment_embeddings = false
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = false

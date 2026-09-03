@@ -19,6 +19,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 """
 
 import json
+import math
 import os
 import signal
 import shutil
@@ -44,6 +45,10 @@ from src.assignments import write_assignments
 from src.token_tying import compute_token_frequencies, compute_tied_mask, apply_tying_to_permutations, build_tying_remap
 from src.config.presets import apply_size_tier, apply_bpe16384_batch_config, scale_batch_for_vram
 from src.weights import compute_weights_map
+from src.run_lock import ActiveRunLock
+from src.datafile import load_data_shard, peek_data_shard
+from src import lr_schedule
+from src import checkpoints as ckpt_utils
 import struct
 import threading
 from queue import Queue
@@ -90,6 +95,7 @@ def check_duplicate_run(
             "experiment": config_dict["experiment"],
             "data": data_compare,
             "optimizer": config_dict["optimizer"],
+            "lr": config_dict["lr"],
         }
 
         # Build filters - only query finished runs, optionally within a group
@@ -144,34 +150,11 @@ def print0(*args, **kwargs):
 
 
 def _peek_data_shard(filename):
-    # only reads the header, returns header data
-    with open(filename, "rb") as f:
-        # first read the header, which is 256 int32 integers (4 bytes each)
-        header = np.frombuffer(f.read(256 * 4), dtype=np.int32)
-    if header[0] != 20251013:
-        print("ERROR: magic number mismatch in the data .bin file!")
-        print("---> HINT: Are you passing in a correct file with --input_bin?")
-        print(
-            "---> HINT: Dataset encoding changed recently, re-run data prepro or refer again to README"
-        )
-        exit(1)
-    assert header[1] == 1, "unsupported version"
-    ntok = header[2]  # number of tokens (claimed)
-    return ntok  # for now just return the number of tokens
+    return peek_data_shard(filename)
 
 
 def _load_data_shard(filename):
-    with open(filename, "rb") as f:
-        # first read the header, which is 256 int32 integers (4 bytes each)
-        header = np.frombuffer(f.read(256 * 4), dtype=np.int32)
-        assert header[0] == 20251013, "magic number mismatch in the data .bin file"
-        assert header[1] == 1, "unsupported version"
-        ntok = header[2]  # number of tokens (claimed)
-        # the rest of it are tokens, stored as uint32
-        tokens = np.frombuffer(f.read(), dtype=np.uint32)
-    print(len(tokens), ntok)
-    assert len(tokens) == ntok, "number of tokens read does not match header?"
-    return tokens
+    return load_data_shard(filename)
 
 
 class DistributedDataLoader:
@@ -243,20 +226,78 @@ class DistributedDataLoader:
         return x, y
 
 
-class _TokenStream:
-    """Sequential token reader over a set of .bin shards."""
+# Granularity of the within-shard shuffle, in tokens. Larger than the 1024-token
+# context so a shuffled block still holds a full window of contiguous text.
+SHUFFLE_BLOCK = 8192
 
-    def __init__(self, filename_pattern: str, process_rank: int, T: int):
+
+def _mix_seed(seed: int, salt: int) -> int:
+    """Stable 64-bit mix. Same inputs -> same stream in every process."""
+    z = (int(seed) * 0x9E3779B97F4A7C15 + int(salt)) & 0xFFFFFFFFFFFFFFFF
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+    return (z ^ (z >> 31)) & 0xFFFFFFFFFFFFFFFF
+
+
+class _TokenStream:
+    """Token reader over a set of .bin shards, optionally shuffled."""
+
+    def __init__(self, filename_pattern: str, process_rank: int, T: int,
+                 shuffle_seed: Optional[int] = None):
         self.files = sorted(glob.glob(filename_pattern))
         assert len(self.files) > 0, (
             f"did not find any files that match the pattern {filename_pattern}"
         )
+        # DATA ORDER. Without a shuffle_seed this reads shards in sorted order and
+        # each shard front-to-back -- inherited from llm.c, which consumes its
+        # whole (small) corpus so order is irrelevant there. Against FineWeb
+        # sample-350BT it is not: files 0-29 are ALL CC-MAIN-2013-20, and a 30B
+        # run reads only the first ~39 of 510 files, so ~77% of it is one 2013
+        # crawl. A 100B run is ~23% that crawl. Different budgets therefore see
+        # different data distributions, and the seed changes nothing about the
+        # data at all.
+        #
+        # With a shuffle_seed, order is permuted at two levels: which shard comes
+        # next, and which block within a shard. Both are pure functions of the
+        # seed, so every rank derives the SAME order and a resume reproduces it
+        # without storing a permutation. Rank disjointness still comes from the
+        # process_rank stride below, exactly as before -- deliberately, so the
+        # union of what the ranks read does not depend on world_size.
+        self.shuffle_seed = shuffle_seed
+        if shuffle_seed is None:
+            self.file_order = np.arange(len(self.files))
+        else:
+            self.file_order = np.random.default_rng(
+                _mix_seed(shuffle_seed, 0x5EED_F11E)
+            ).permutation(len(self.files))
         self.current_shard = 0
-        self.tokens = _load_data_shard(self.files[0])
+        self.tokens = self._load_ordered(0)
         if len(self.tokens) > (T + 2):
             self.token_pos = (process_rank * T) % (len(self.tokens) - (T + 2))
         else:
             self.token_pos = 0
+
+    def _load_ordered(self, ordinal: int) -> np.ndarray:
+        """Shard at position `ordinal` of the permuted file order, blocks shuffled.
+
+        Permuting whole blocks rather than individual tokens keeps each block a
+        contiguous run of real text; only the order blocks appear in changes.
+        The tail that does not fill a block is left in place rather than dropped,
+        so no tokens are lost.
+        """
+        tokens = _load_data_shard(self.files[self.file_order[ordinal]])
+        if self.shuffle_seed is None:
+            return tokens
+        n_full = len(tokens) // SHUFFLE_BLOCK
+        if n_full < 2:
+            return tokens
+        rng = np.random.default_rng(
+            _mix_seed(self.shuffle_seed, int(self.file_order[ordinal]))
+        )
+        head = tokens[: n_full * SHUFFLE_BLOCK].reshape(n_full, SHUFFLE_BLOCK)
+        out = head[rng.permutation(n_full)].reshape(-1)
+        tail = tokens[n_full * SHUFFLE_BLOCK :]
+        return np.concatenate([out, tail]) if len(tail) else out
 
     def read_tokens(self, n: int) -> np.ndarray:
         out = np.empty(n, dtype=np.int32)
@@ -279,13 +320,13 @@ class _TokenStream:
     def advance(self) -> None:
         self.current_shard = (self.current_shard + 1) % len(self.files)
         self.token_pos = 0
-        self.tokens = _load_data_shard(self.files[self.current_shard])
+        self.tokens = self._load_ordered(self.current_shard)
 
     def load_shard(self, idx: int) -> None:
         new_idx = idx % len(self.files)
         if new_idx != self.current_shard:
             self.current_shard = new_idx
-            self.tokens = _load_data_shard(self.files[self.current_shard])
+            self.tokens = self._load_ordered(self.current_shard)
         self.token_pos = 0
 
     def state_dict(self) -> dict:
@@ -312,8 +353,27 @@ class SyntheticTokenStream:
     """Token stream that generates synthetic tokens on-the-fly."""
 
     def __init__(self, mode: str, vocab_size: int, seed: int,
-                 process_rank: int, frequencies: np.ndarray | None = None):
-        self._mode = mode  # "uniform" or "frequency"
+                 process_rank: int, frequencies: np.ndarray | None = None,
+                 ngram_table_dir: str = "data/ngram-tables-bpe16384"):
+        # "uniform" | "frequency" | "ngram{N}" -- ngram is the capacity-competition
+        # ladder: order N n-grams estimated on this same FineWeb corpus, so the
+        # synthetic compartment becomes progressively more English-like with N.
+        self._mode = mode
+        self._ngram = None
+        if mode.startswith("ngram"):
+            from src.ngram_fast import FastNGramSampler
+            # "ngram3" = pure trigram; "ngram3x0.5" = Jelinek-Mercer 0.5*P_3 +
+            # 0.5*P_2, i.e. a "2.5-gram" rung on the capacity ladder.
+            spec = mode[5:]
+            if "x" in spec:
+                o_str, lam_str = spec.split("x", 1)
+                order, lam = int(o_str), float(lam_str)
+            else:
+                order, lam = int(spec), 1.0
+            self._ngram = FastNGramSampler(
+                order=order, table_dir=ngram_table_dir, seed=seed,
+                process_rank=process_rank, lam=lam,
+            )
         self._vocab_size = vocab_size
         self._seed = seed
         self._process_rank = process_rank
@@ -329,6 +389,8 @@ class SyntheticTokenStream:
             self._probs = None
 
     def read_tokens(self, n: int) -> np.ndarray:
+        if self._ngram is not None:
+            return self._ngram.read_tokens(n)
         if self._mode == "uniform":
             return self._rng.integers(0, self._vocab_size, size=n, dtype=np.int32)
         else:
@@ -337,9 +399,14 @@ class SyntheticTokenStream:
             ).astype(np.int32)
 
     def state_dict(self) -> dict:
+        if self._ngram is not None:
+            return {"ngram": self._ngram.state_dict()}
         return {"rng_state": self._rng.bit_generator.state}
 
     def load_state_dict(self, state: dict) -> None:
+        if self._ngram is not None and "ngram" in state:
+            self._ngram.load_state_dict(state["ngram"])
+            return
         if "rng_state" in state:
             self._rng.bit_generator.state = state["rng_state"]
         # Silently ignore incompatible state (e.g. _TokenStream checkpoint)
@@ -353,7 +420,7 @@ class SyntheticTokenStream:
 class AssignmentsDataLoader:
     def __init__(
         self,
-        assignments_file: str,
+        assignments_file: Optional[str],
         filename_pattern: str,
         B: int,
         T: int,
@@ -362,6 +429,27 @@ class AssignmentsDataLoader:
         base_vocab_size: int,
         max_compartments: int,
         n_compartments: int,
+        # Record count to assume when assignments_file is None (c=1). Only sets
+        # the wrap point for assignment_idx; the records themselves are constant.
+        constant_records: Optional[int] = None,
+        # Per-compartment BPE variants. <=1.0 disables, and the whole expansion
+        # path is then dead code -- the offset encoding below is untouched.
+        bpe_variant_expansion: float = 0.0,
+        bpe_variant_tokenizer: str = "",
+        bpe_variant_seed: int = 0,
+        # Where merge frequencies are counted. Must be the TRAIN shards for every
+        # loader, so train and val share one drop set per compartment.
+        bpe_variant_freq_pattern: str = "",
+        # First id of the per-compartment prefix markers, or None to disable.
+        # Compartment i's marker is marker_base + i.
+        compartment_marker_base: Optional[int] = None,
+        # c-way in, 1-out: targets are base-vocab ids, inputs keep the offset.
+        shared_output_vocab: bool = False,
+        # Seed for corpus read order; None reads shards and blocks in file order.
+        # Identical on every rank on purpose -- rank disjointness comes from the
+        # process_rank stride, so the union of what the ranks read does not
+        # depend on world_size.
+        shuffle_seed: Optional[int] = None,
         permute_tokens: bool = False,
         permutations_path: Optional[str] = None,
         permute_inputs: bool = True,
@@ -416,21 +504,43 @@ class AssignmentsDataLoader:
         # Whether to return pinned-memory CPU tensors for faster H2D copies
         self._pin_memory = bool(pin_memory and torch.cuda.is_available())
 
-        # Load assignments header and records
-        with open(assignments_file, "rb") as f:
-            header = f.read(32)
-            magic, version, rec_size, flags, num_compartments, num_records, seed = (
-                struct.unpack("<8sBBHIQQ", header)
+        # Load assignments header and records.
+        #
+        # assignments_file is None exactly when n_compartments == 1, where the
+        # array is a constant: one category, encoding compartment 0, so every
+        # record is the integer 0. Materialising it cost 8 B/example of RAM PER
+        # RANK for a value the per-batch gather below always decodes to
+        # (kind=0, src=0, dst=0) -- 0.78 GB/rank on a 100B run, 2.34 GB/rank at
+        # the pinned 300B horizon, times 8 ranks. Synthesize it instead.
+        if assignments_file is None:
+            assert n_compartments == 1, (
+                "assignments_file may only be omitted at n_compartments == 1"
             )
-            assert magic == b"TCASSIGN", "assignments magic mismatch"
-            assert version == 1 and rec_size == 8, (
-                "unsupported assignments version/record size"
+            assert constant_records is not None, (
+                "constant_records is required when assignments_file is None"
             )
-            assert num_compartments == max_compartments, (
-                f"assignments num_compartments {num_compartments} != expected {max_compartments}"
-            )
-            self._records = np.frombuffer(f.read(), dtype=np.uint64)
-        self.num_records = int(self._records.shape[0])
+            self._records = None
+            # Behaviourally irrelevant here (the gather is constant), but it keeps
+            # assignment_idx's wrap point -- and therefore the value checkpointed
+            # in state_dict -- identical to the materialised path.
+            self.num_records = int(constant_records)
+            self._zero_words = np.zeros(B, dtype=np.uint64)
+        else:
+            with open(assignments_file, "rb") as f:
+                header = f.read(32)
+                magic, version, rec_size, flags, num_compartments, num_records, seed = (
+                    struct.unpack("<8sBBHIQQ", header)
+                )
+                assert magic == b"TCASSIGN", "assignments magic mismatch"
+                assert version == 1 and rec_size == 8, (
+                    "unsupported assignments version/record size"
+                )
+                assert num_compartments == max_compartments, (
+                    f"assignments num_compartments {num_compartments} != expected {max_compartments}"
+                )
+                self._records = np.frombuffer(f.read(), dtype=np.uint64)
+            self.num_records = int(self._records.shape[0])
+            self._zero_words = None
 
         # Multi-source mode: one _TokenStream or SyntheticTokenStream per compartment
         self._multi_source = compartment_filename_patterns is not None
@@ -447,11 +557,46 @@ class AssignmentsDataLoader:
                         frequencies=synthetic_frequencies,
                     ))
                 else:
-                    self._streams.append(_TokenStream(pat, process_rank, T))
+                    self._streams.append(
+                        _TokenStream(pat, process_rank, T, shuffle_seed=shuffle_seed)
+                    )
             self._stream: Optional[_TokenStream] = None
         else:
-            self._stream = _TokenStream(filename_pattern, process_rank, T)
+            self._stream = _TokenStream(
+                filename_pattern, process_rank, T, shuffle_seed=shuffle_seed
+            )
             self._streams: Optional[list[_TokenStream]] = None
+
+        # Per-compartment merge-drop sets and expansion indices, built once.
+        # Each compartment gets its own drop set seeded by (bpe_variant_seed,
+        # compartment_id) and NOTHING else -- so a c=2 run's schemes are exactly a
+        # c=8 run's first two, and cross-c comparisons are not confounded by the
+        # compartments having different tokenizers.
+        self._marker_base = compartment_marker_base
+        self._shared_out = bool(shared_output_vocab)
+        self._expand: Optional[list] = None
+        # Unconsumed BASE tokens carried between examples. Compartment-agnostic,
+        # so this splices nothing: it is the same contiguous stream either way.
+        self._base_buf = np.empty(0, dtype=np.int64)
+        self._base_chunk = max(4096, T * 4)
+        if bpe_variant_expansion and bpe_variant_expansion > 1.0:
+            from src import bpe_variants as bv
+            table = bv.load_merge_table(bpe_variant_tokenizer)
+            # Frequencies come from the TRAIN pattern, always -- never from this
+            # loader's own data. Computing them per-loader gave the val loader a
+            # DIFFERENT drop set than train (9,412 vs 9,436 merges for
+            # compartment 0), i.e. the model would have been evaluated under a
+            # tokenization it never trained on. Silent: both look like 2.0x.
+            freq = bv.token_frequencies(
+                bpe_variant_freq_pattern or filename_pattern, base_vocab_size)
+            self._expand = []
+            for ci in range(n_compartments):
+                dropped, got = bv.select_dropped_merges(
+                    freq, table, float(bpe_variant_expansion), bpe_variant_seed, ci)
+                flat, off = bv.build_expansion_index(table, dropped, base_vocab_size)
+                self._expand.append((flat, off))
+                print0(f"[bpe-variant] compartment {ci}: {len(dropped):,} merges "
+                       f"dropped, expansion {got:.4f}x")
 
         # assignment index start (strided by world size)
         self.assignment_idx = self.process_rank % max(1, self.num_records)
@@ -559,7 +704,11 @@ class AssignmentsDataLoader:
         rec_indices = (
             self.assignment_idx + self.num_processes * np.arange(B, dtype=np.int64)
         ) % max(1, self.num_records)
-        words = self._records[rec_indices]
+        # _records is None at c=1, where the gather returns 0 for every index.
+        # _zero_words is preallocated at length self.B, which is exactly len(rec_indices).
+        words = (
+            self._zero_words if self._records is None else self._records[rec_indices]
+        )
         w = words.astype(np.uint64, copy=False)
         kinds = (w & np.uint64(0xFF)).astype(np.int64, copy=False)
         srcs = ((w >> np.uint64(16)) & np.uint64(0xFFFF)).astype(np.int64, copy=False)
@@ -583,13 +732,46 @@ class AssignmentsDataLoader:
                 half, T,
             )
         else:
-            # Single-source: read contiguous tokens from one stream
-            size_per_b = np.where(is_trans, half, T).astype(np.int64, copy=False)
-            starts = np.zeros(B, dtype=np.int64)
-            if B > 1:
-                starts[1:] = np.cumsum(size_per_b[:-1], dtype=np.int64)
-            total_needed = int(starts[-1] + size_per_b[-1])
-            tokens_batch = self._stream.read_tokens(total_needed).astype(np.int64, copy=False)  # type: ignore[union-attr]
+            if self._expand is not None:
+                # Each example consumes a VARIABLE number of base tokens, because
+                # its compartment's segmentation decides how far T tokens reach.
+                # Read until the budget is filled, per example, advancing one
+                # shared cursor -- so examples stay on disjoint, contiguous text.
+                samples = np.zeros((B, T), dtype=np.int64)
+                from src import bpe_variants as bv
+                for b in range(B):
+                    flat, off = self._expand[int(srcs[b])]
+                    need = int(half if is_trans[b] else T)
+                    got = np.empty(0, dtype=np.int64)
+                    while len(got) < need:
+                        if self._base_buf.size == 0:
+                            self._base_buf = self._stream.read_tokens(
+                                self._base_chunk
+                            ).astype(np.int64, copy=False)
+                        piece, used = bv.expand(
+                            self._base_buf, flat, off, limit=need - len(got))
+                        got = np.concatenate([got, piece])
+                        # `used` is how many BASE tokens that consumed. Keep the
+                        # rest: base tokens carry no compartment identity, so an
+                        # unconsumed remainder is usable by whichever example
+                        # comes next, whatever compartment it belongs to. Without
+                        # this the stream advances by the full chunk each time and
+                        # the run silently reads the corpus at ~2x the rate,
+                        # discarding half the text.
+                        self._base_buf = self._base_buf[used:]
+                    samples[b, :need] = got[:need]
+                # Same fill as the normal path: expansion happens BEFORE the
+                # compartment offset, so _fill_batch_single_source is untouched.
+                tokens_batch = samples.reshape(-1)
+                starts = np.arange(B, dtype=np.int64) * T
+            else:
+                # Single-source: read contiguous tokens from one stream
+                size_per_b = np.where(is_trans, half, T).astype(np.int64, copy=False)
+                starts = np.zeros(B, dtype=np.int64)
+                if B > 1:
+                    starts[1:] = np.cumsum(size_per_b[:-1], dtype=np.int64)
+                total_needed = int(starts[-1] + size_per_b[-1])
+                tokens_batch = self._stream.read_tokens(total_needed).astype(np.int64, copy=False)  # type: ignore[union-attr]
             self._fill_batch_single_source(
                 x_np, y_np, cid_np, idx_comp, idx_trans, srcs, dsts,
                 tokens_batch, starts, half, T,
@@ -770,8 +952,25 @@ class AssignmentsDataLoader:
                 base = self.base_vocab_size
                 src_off = srcs[idx_comp][:, None] * base
                 x_comp = samples + src_off
+            if self._marker_base is not None:
+                # Prefix each sequence with its compartment's marker id. The last
+                # content token is dropped so the length stays exactly T, which
+                # costs 0.1% of a 1024-token window. y is derived from x below,
+                # so the marker's target is the first content token -- the model
+                # is asked to predict from the marker, which is the point.
+                mk = (self._marker_base + srcs[idx_comp][:, None]).astype(x_comp.dtype)
+                x_comp = np.concatenate([mk, x_comp[:, :-1]], axis=1)
+            # c-in/1-out: predict the SHARED base id, so every compartment maps
+            # its private input vocabulary onto one output space. `samples` is
+            # already the un-offset base ids; the marker branch above shifted the
+            # inputs by one, so shift the targets to match or they misalign by a
+            # position -- which would look like a merely harder task rather than
+            # a broken one.
+            src = samples if self._shared_out else x_comp
+            if self._shared_out and self._marker_base is not None:
+                src = np.concatenate([samples[:, :1], samples[:, :-1]], axis=1)
             y_comp = np.empty_like(x_comp)
-            y_comp[:, :-1] = x_comp[:, 1:]
+            y_comp[:, :-1] = src[:, 1:]
             y_comp[:, -1] = -1
 
         x_np[idx_comp] = x_comp
@@ -779,15 +978,99 @@ class AssignmentsDataLoader:
         cid_np[idx_comp, :] = srcs[idx_comp][:, None]
 
 
-STORAGE_ROOT = os.environ.get(
-    "TC_STORAGE_ROOT", "/mnt/pccfs2/backed_up/vin/dev/translation-compression"
+# Where data/, out/ and cache/ live. Resolution order:
+#   1. TC_STORAGE_ROOT, if set -- explicit wins.
+#   2. The historical pccfs2 path, if it exists on this host.
+#   3. The directory containing this file.
+#
+# (3) exists because this repo runs on machines that do NOT mount pccfs2 (ORC
+# uses /grphome + /nobackup). Hardcoding the pccfs2 path made every job there
+# die instantly with "STORAGE_ROOT ... is not a directory" -- 13 runs failed
+# that way, each in under 10s, and because the pool only records "FAILED rc=1"
+# the cause was invisible until a config was run by hand. Falling back to the
+# repo directory is correct on any host: data/, out/ and cache/ are repo-relative
+# everywhere they are used.
+_DEFAULT_STORAGE = "/mnt/pccfs2/backed_up/vin/dev/translation-compression"
+STORAGE_ROOT = os.environ.get("TC_STORAGE_ROOT") or (
+    _DEFAULT_STORAGE
+    if os.path.isdir(_DEFAULT_STORAGE)
+    else os.path.dirname(os.path.abspath(__file__))
 )
+if not os.path.isdir(STORAGE_ROOT):
+    raise SystemExit(
+        f"STORAGE_ROOT={STORAGE_ROOT!r} is not a directory. "
+        f"Set TC_STORAGE_ROOT to the correct path for this host."
+    )
 
 ROLLING_CHECKPOINT_INTERVAL = 1000
 
 
+DATALOADER_STATE = "dataloader.pt"          # pre-2026-08-15 layout: rank 0 only
+
+
+def _dl_state_name(rank: int) -> str:
+    return f"dataloader_rank{int(rank)}.pt"
+
+
+def save_dataloader_state(ckpt_dir, train_loader, val_loader, rank: int) -> None:
+    """Write THIS rank's dataloader state. Called by every rank, not just master.
+
+    Every rank must persist its own position. Before 2026-08-15 only rank 0's
+    state was written and every rank restored it, so after any resume all ranks
+    replayed rank 0's stream: distinct sequences per optimizer step fell from
+    2048 to 256 while the LR stayed tuned for 2048. It is silent -- training
+    continues and the loss curve stays plausible.
+
+    Rank 0's state cannot be used to reconstruct rank r's, either. Ranks advance
+    in lockstep ONLY at translation_ratio=0; once tr>0 a translation example
+    consumes T/2 tokens instead of T, and which examples are translations is a
+    per-rank property of the assignments, so the streams drift apart by a
+    data-dependent amount. Hence one file per rank rather than an offset.
+    """
+    os.makedirs(ckpt_dir, exist_ok=True)
+    state = {"train": train_loader.state_dict(), "rank": int(rank)}
+    if val_loader is not None:
+        state["val"] = val_loader.state_dict()
+    torch.save(state, os.path.join(ckpt_dir, _dl_state_name(rank)))
+
+
+def load_dataloader_state(ckpt_dir, rank: int):
+    """This rank's saved state, or None.
+
+    Falls back to the pre-fix single-file layout, which only ever holds rank 0's
+    position. Resuming every rank from it is what the fix exists to prevent, so
+    this refuses rather than silently reproducing the bug; set
+    TC_ALLOW_RANK0_DATALOADER_RESUME=1 to accept it for a run whose checkpoints
+    predate the fix and whose remaining budget makes a restart worse.
+    """
+    per_rank = os.path.join(ckpt_dir, _dl_state_name(rank))
+    if os.path.exists(per_rank):
+        return torch.load(per_rank, map_location="cpu", weights_only=False)
+
+    legacy = os.path.join(ckpt_dir, DATALOADER_STATE)
+    if not os.path.exists(legacy):
+        return None
+    if os.environ.get("TC_ALLOW_RANK0_DATALOADER_RESUME") == "1":
+        print0(
+            f"WARNING: {ckpt_dir} predates per-rank dataloader state; every rank "
+            f"will resume from rank 0's position and train on IDENTICAL data "
+            f"(TC_ALLOW_RANK0_DATALOADER_RESUME=1)."
+        )
+        return torch.load(legacy, map_location="cpu", weights_only=False)
+    raise RuntimeError(
+        f"{ckpt_dir} has only {DATALOADER_STATE} (rank 0's position). Resuming "
+        f"every rank from it makes all ranks train on identical data -- the bug "
+        f"fixed on 2026-08-15. Options:\n"
+        f"  - restart this run from a checkpoint written after the fix\n"
+        f"  - TC_ALLOW_RANK0_DATALOADER_RESUME=1 to accept the duplication\n"
+        f"  - delete {legacy} to resume with fresh per-rank stream positions "
+        f"(model and optimizer state are kept; only data position resets)"
+    )
+
+
 def _save_rolling_checkpoint(out_dir, raw_model, optimizer, train_loader,
-                             val_loader, iter_num, best_val_loss):
+                             val_loader, iter_num, best_val_loss,
+                             rank: int = 0, master: bool = True):
     """Save a rolling 'latest' checkpoint for preemption resilience.
 
     Overwrites a single _rolling/ directory each time. trainer_state.json is
@@ -796,12 +1079,12 @@ def _save_rolling_checkpoint(out_dir, raw_model, optimizer, train_loader,
     ck_root = os.path.join(out_dir, "checkpoints")
     rolling_dir = os.path.join(ck_root, "_rolling")
     os.makedirs(rolling_dir, exist_ok=True)
+    # EVERY rank records its own stream position; only master writes the weights.
+    save_dataloader_state(rolling_dir, train_loader, val_loader, rank)
+    if not master:
+        return
     torch.save(raw_model.state_dict(), os.path.join(rolling_dir, "model.pt"))
     torch.save(optimizer.state_dict(), os.path.join(rolling_dir, "optimizer.pt"))
-    dl_state = {"train": train_loader.state_dict()}
-    if val_loader is not None:
-        dl_state["val"] = val_loader.state_dict()
-    torch.save(dl_state, os.path.join(rolling_dir, "dataloader.pt"))
     # Write trainer_state.json LAST — its existence signals a complete checkpoint
     with open(os.path.join(rolling_dir, "trainer_state.json"), "w") as f:
         json.dump({"iter_num": iter_num, "best_val_loss": float(best_val_loss)}, f)
@@ -896,10 +1179,21 @@ def main(config: JobConfig) -> None:
     beta2 = config.optimizer.beta2
     grad_clip = config.optimizer.grad_clip
     # learning rate decay settings
-    # decay_lr = config.lr.decay_lr
     warmup_iters = config.lr.warmup_iters
-    # lr_decay_iters = config.lr.lr_decay_iters
-    # min_lr = config.lr.min_lr
+    decay_lr = config.lr.decay_lr
+    schedule = getattr(config.lr, "schedule", "legacy")
+    decay_start_iter = getattr(config.lr, "decay_start_iter", 0)
+    decay_end_iter = getattr(config.lr, "decay_end_iter", 0)
+    lr_decay_iters = config.lr.lr_decay_iters
+    min_lr = config.lr.min_lr
+    lr_schedule.validate(
+        schedule=schedule,
+        warmup_iters=warmup_iters,
+        decay_start_iter=decay_start_iter,
+        decay_end_iter=decay_end_iter,
+        peak=learning_rate,
+        min_lr=min_lr,
+    )
     # DDP settings
     backend = config.distributed.backend
     # system
@@ -919,12 +1213,17 @@ def main(config: JobConfig) -> None:
     ddp = int(os.environ.get("RANK", -1)) != -1  # is this a ddp run?
     ddp_rank = None
     if ddp:
-        init_process_group(backend=backend)
-        ddp_rank = int(os.environ["RANK"])
         ddp_local_rank = int(os.environ["LOCAL_RANK"])
-        ddp_world_size = int(os.environ["WORLD_SIZE"])
         device = f"cuda:{ddp_local_rank}"
+        # Bind this rank to its GPU *before* init_process_group. Otherwise NCCL
+        # guesses the device from the global rank ("Guessing device ID based on
+        # global rank. This can cause a hang...") and the first barrier can
+        # deadlock — that cost us a full 24h B200 node-day on job 12901827,
+        # which sat in the barrier and never ran a single iteration.
         torch.cuda.set_device(device)
+        init_process_group(backend=backend, device_id=torch.device(device))
+        ddp_rank = int(os.environ["RANK"])
+        ddp_world_size = int(os.environ["WORLD_SIZE"])
         master_process = (
             ddp_rank == 0
         )  # this process will do logging, checkpointing etc.
@@ -938,6 +1237,14 @@ def main(config: JobConfig) -> None:
         master_process = True
         seed_offset = 0
         ddp_world_size = 1
+    active_run_lock = None
+    if master_process:
+        active_run_lock = ActiveRunLock(
+            out_dir,
+            run_id=run_id,
+            config_path=os.environ.get("CONFIG_PATH"),
+            config_identity=cfg_hash(config),
+        ).acquire()
     tokens_per_iter = (
         gradient_accumulation_steps * ddp_world_size * batch_size * block_size
     )
@@ -950,34 +1257,108 @@ def main(config: JobConfig) -> None:
     # Restrict checkpointing to these specific global steps only (reverse engineering
     # Morris figure)
     checkpoint_steps = {
-        100,
-        850,
-        3500,
-        7000,
-        14000,
-        29000,
-        60000,
-        120000,
-        240000,
-        500000,
-        1000000,
+        # Dense early-training cadence for resolution where curves diverge most.
+        50, 100, 150, 200, 250, 300, 400, 500, 600, 750,
+        1000, 1250, 1500, 1750, 2000, 2500, 3000, 3500, 4000,
+        5000, 6000, 7000, 8000, 9000, 10000,
+        12000, 14000,
+        # Sparser later
+        20000, 29000,
+        # 35k-45k fill the gap between 29000 and 50000: at 2.1M tok/step a 100B
+        # run ends at 47,684 steps, so without these the last 39B tokens produce
+        # no checkpoint at all -- unevaluable, and no branch point for an anneal.
+        35000, 40000, 45000,
+        50000, 60000, 80000, 100000, 120000, 150000, 200000, 240000,
+        300000, 350000, 400000, 500000, 700000, 1000000,
+        # Extension for the n=8 tr=0.1 epoch run (~1 epoch ≈ 2.96M steps)
+        1250000, 1500000, 1750000, 2000000, 2250000, 2500000, 2750000, 2950000,
+        # Dense extension for 1B tr=0.056 (1M → 2M), target-half loss curve.
+        # Every 100k + 2 early resume-check points.
+        1050000, 1100000, 1200000, 1300000, 1400000, 1600000, 1700000, 1800000, 1900000,
     }
+
+    # Which of those also carry optimizer + dataloader state, making them
+    # resumable and forkable. Everything else stays weights-only; see
+    # Training.full_state_at_tokens for why the list is short.
+    checkpoint_naming = getattr(config.training, "checkpoint_naming", "step")
+    full_state_at = tuple(getattr(config.training, "full_state_at_tokens", ()) or ())
+    # A decay child keeps its checkpoints under checkpoints/annealed/ so that a
+    # bare glob for stable points cannot pick them up — annealed losses sit
+    # below the stable curve and must never join that series by accident.
+    is_anneal_child = schedule == "wsd" and decay_end_iter > 0
+    if is_anneal_child:
+        # Annealed checkpoints are terminal: you would not extend past an anneal
+        # (that is the re-warm discontinuity WSD exists to avoid), so nothing
+        # here needs optimizer state. _rolling still covers preemption during
+        # the decay itself.
+        full_state_iters = frozenset()
+    else:
+        full_state_iters = ckpt_utils.full_state_steps(
+            full_state_at, tokens_per_iter, config.training.max_iters
+        )
+        # A branch point that is not a scheduled checkpoint never gets written.
+        checkpoint_steps = checkpoint_steps | full_state_iters
+
+    def _checkpoint_dir(ck_root, it):
+        """Path for the named checkpoint at iteration `it`."""
+        if checkpoint_naming == "tokens":
+            name = ckpt_utils.tok_dirname(it * tokens_per_iter)
+        else:
+            name = f"step-{it:06d}"
+        if is_anneal_child:
+            return os.path.join(ck_root, ckpt_utils.ANNEALED, name)
+        return os.path.join(ck_root, name)
 
     assignments_path = os.path.join(out_dir, "assignments.bin")
     permutations_path = os.path.join(out_dir, "permutations.npy")
     training_seed = config.training.seed + seed_offset
+    # Base seed without DDP rank offset — used for assignment/permutation cache paths
+    # so all ranks agree on the same file (only master generates it).
+    base_seed = config.training.seed
     # Determine data source
     use_pretokenized = config.data.source == "pretokenized"
 
     # If using pretokenized data, compute deterministic cache paths for assignments/permutations
     if use_pretokenized:
-        # Cache directory under the same hardcoded storage root
-        cache_root = os.path.join(STORAGE_ROOT, "cache")
+        # Assignment cache location. Defaults to the shared storage root, so
+        # nothing changes unless TC_ASSIGNMENT_CACHE is set explicitly.
+        #
+        # WHY THE OVERRIDE EXISTS. A multi-compartment 1M-step run needs a
+        # 16.4GB assignment file (2.048e9 records x 8B). The shared mount is
+        # NFS with rsize/wsize=32768 -- a 32KB transfer unit, 32x below the
+        # modern default -- so that write costs 524,288 RPCs, and was measured
+        # at ~76 MiB/min (about 3.6 hours) while the server was degraded.
+        # Pointing this at node-local disk turns it into a local write. The
+        # file is derived data, keyed by (weights, total_examples, seed), so a
+        # per-node copy is safe: any node regenerates an identical file.
+        cache_root = os.environ.get("TC_ASSIGNMENT_CACHE") or os.path.join(STORAGE_ROOT, "cache")
         exp = config.experiment
         if exp.max_compartments is None:
             raise ValueError("experiment.max_compartments is required")
         max_compartments_int = cast(int, exp.max_compartments)
-        total_examples = config.training.max_iters * effective_batch_size
+        # The assignment array length is the CACHE KEY, and
+        # _largest_remainder_allocations re-partitions the whole array when it
+        # changes -- so deriving it from max_iters means extending a run silently
+        # re-randomises every example's compartment. Measured on the 30B->100B
+        # c=8 extension: 1/8 of assignments survived, val loss +0.19 nats.
+        _needed = config.training.max_iters * effective_batch_size
+        _horizon = int(getattr(config.experiment, "assignment_horizon_examples", 0) or 0)
+        if _horizon and _horizon < _needed:
+            raise ValueError(
+                f"experiment.assignment_horizon_examples ({_horizon:,}) is smaller "
+                f"than this run needs ({_needed:,} = max_iters "
+                f"{config.training.max_iters:,} x batch {effective_batch_size:,}). "
+                f"Raise it; lowering the horizon re-randomises every assignment."
+            )
+        total_examples = _horizon or _needed
+
+        # c=1 needs no assignment array at all. One compartment means exactly one
+        # category (compute_weights_map rejects translation_ratio > 0 at n < 2), so
+        # every record encodes compartment 0 and the whole array is the constant 0.
+        # Nothing consumes it: the loader's per-batch gather is constant, and the
+        # only reader outside training -- experiment/eval_utils.token_counts_at_examples
+        # -- has no callers. Skipping it saves 8 B/example of RAM on every rank.
+        skip_assignments = exp.n_compartments == 1
 
         # Format float safely for filenames
         def _fmt_float(x: float) -> str:
@@ -989,18 +1370,22 @@ def main(config: JobConfig) -> None:
             f"n{exp.n_compartments}_t{_fmt_float(max(0.0, float(exp.translation_ratio)))}_"
             f"m{exp.translation_ratio_mode}_"
             f"sc{exp.compartment_scaling}_total{int(total_examples)}_"
-            f"maxc{max_compartments_int}_seed{int(training_seed)}"
+            f"maxc{max_compartments_int}_seed{int(base_seed)}"
+            + ("" if getattr(exp, "assignment_order", "lcg") == "lcg" else "_hash")
         )
-        # Point assignments_path to cached file
-        assignments_path = os.path.join(
-            cache_root, f"assignments_{assignments_desc}.bin"
+        # Point assignments_path to cached file. None at c=1 -- the loader
+        # synthesizes the constant records rather than reading them.
+        assignments_path = (
+            None
+            if skip_assignments
+            else os.path.join(cache_root, f"assignments_{assignments_desc}.bin")
         )
 
         # If permuting tokens per compartment, also compute cached permutations path
         if exp.permute_tokens_per_compartment:
             if config.model.vocab_size is not None:
                 base_vocab_int = cast(int, config.model.vocab_size)
-                perms_desc = f"basev{base_vocab_int}_maxc{max_compartments_int}_seed{int(training_seed)}"
+                perms_desc = f"basev{base_vocab_int}_maxc{max_compartments_int}_seed{int(base_seed)}"
                 permutations_path = os.path.join(
                     cache_root, f"permutations_{perms_desc}.npy"
                 )
@@ -1016,59 +1401,85 @@ def main(config: JobConfig) -> None:
                 if exp.max_compartments is None:
                     raise ValueError("experiment.max_compartments is required")
                 max_compartments_int = cast(int, exp.max_compartments)
-                total_examples = config.training.max_iters * effective_batch_size
-                # Ensure cache directory exists
-                cache_root = os.path.dirname(assignments_path)
-                os.makedirs(cache_root, exist_ok=True)
-                # Assignments: write only if not already cached, with simple cross-process locking
-                if not os.path.exists(assignments_path):
-                    lock_path = assignments_path + ".lock"
-                    tmp_path = assignments_path + f".tmp.{os.getpid()}"
-                    acquired = False
-                    while True:
-                        try:
-                            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-                            os.close(fd)
-                            acquired = True
-                            break
-                        except FileExistsError:
-                            # Another process is writing; wait until file appears
-                            if os.path.exists(assignments_path):
+                # Horizon decoupled from max_iters; see
+                # Experiment.assignment_horizon_examples.
+                total_examples = int(
+                    getattr(config.experiment, "assignment_horizon_examples", 0) or 0
+                ) or (config.training.max_iters * effective_batch_size)
+                # c=1 (skip_assignments) has no array to build: assignments_path
+                # is None and the loader synthesizes the constant records. The
+                # permutation block below still runs -- 10 configs pair c=1 with
+                # permute_tokens_per_compartment and would break without it.
+                if not skip_assignments:
+                    # Ensure cache directory exists
+                    cache_root = os.path.dirname(assignments_path)
+                    os.makedirs(cache_root, exist_ok=True)
+                    # Refuse to fill the volume. These files are 8 bytes/record, so a
+                    # 1M-step multi-compartment run is 16.4GB -- enough to exhaust a
+                    # node-local disk that is shared with other people's data. Fail
+                    # loudly BEFORE writing rather than ENOSPC-ing hours in, which
+                    # would leave a truncated .tmp and a held lock behind.
+                    if not os.path.exists(assignments_path):
+                        need = 32 + int(total_examples) * 8
+                        margin = 20 * 1024**3
+                        free = shutil.disk_usage(cache_root).free
+                        if free < need + margin:
+                            raise SystemExit(
+                                f"refusing to write assignments to {cache_root}: need "
+                                f"{need/1024**3:.1f}GB + {margin/1024**3:.0f}GB margin but only "
+                                f"{free/1024**3:.1f}GB free. Point TC_ASSIGNMENT_CACHE at a "
+                                f"volume with room, or free space here."
+                            )
+                    # Assignments: write only if not already cached, with simple cross-process locking
+                    if not os.path.exists(assignments_path):
+                        lock_path = assignments_path + ".lock"
+                        tmp_path = assignments_path + f".tmp.{os.getpid()}"
+                        acquired = False
+                        while True:
+                            try:
+                                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                                os.close(fd)
+                                acquired = True
                                 break
-                            time.sleep(0.1)
-                    if acquired:
-                        try:
-                            write_assignments(
-                                tmp_path,
-                                weights_map=compute_weights_map(
-                                    n=exp.n_compartments,
-                                    t=max(0.0, float(exp.translation_ratio)),
-                                    scaling=exp.compartment_scaling,
-                                    mode=exp.translation_ratio_mode,
-                                ),
-                                total_examples=total_examples,
-                                max_compartments=max_compartments_int,
-                                seed=training_seed,
-                                no_shuffle=False,
-                            )
-                            os.replace(tmp_path, assignments_path)
-                            print0(
-                                f"Wrote assignments to {assignments_path} with total_examples={total_examples:,}"
-                            )
-                        finally:
+                            except FileExistsError:
+                                # Another process is writing; wait until file appears
+                                if os.path.exists(assignments_path):
+                                    break
+                                time.sleep(0.1)
+                        if acquired:
                             try:
-                                if os.path.exists(tmp_path):
-                                    os.remove(tmp_path)
-                            except Exception:
-                                pass
-                            try:
-                                os.remove(lock_path)
-                            except Exception:
-                                pass
+                                write_assignments(
+                                    tmp_path,
+                                    weights_map=compute_weights_map(
+                                        n=exp.n_compartments,
+                                        t=max(0.0, float(exp.translation_ratio)),
+                                        scaling=exp.compartment_scaling,
+                                        mode=exp.translation_ratio_mode,
+                                    ),
+                                    total_examples=total_examples,
+                                    max_compartments=max_compartments_int,
+                                    seed=base_seed,
+                                    order=getattr(config.experiment, "assignment_order", "lcg"),
+                                    no_shuffle=False,
+                                )
+                                os.replace(tmp_path, assignments_path)
+                                print0(
+                                    f"Wrote assignments to {assignments_path} with total_examples={total_examples:,}"
+                                )
+                            finally:
+                                try:
+                                    if os.path.exists(tmp_path):
+                                        os.remove(tmp_path)
+                                except Exception:
+                                    pass
+                                try:
+                                    os.remove(lock_path)
+                                except Exception:
+                                    pass
+                        else:
+                            print0(f"Using cached assignments at {assignments_path}")
                     else:
                         print0(f"Using cached assignments at {assignments_path}")
-                else:
-                    print0(f"Using cached assignments at {assignments_path}")
                 # If enabled, also create deterministic per-compartment permutations of base tokens
                 if exp.permute_tokens_per_compartment:
                     if config.model.vocab_size is None:
@@ -1288,6 +1699,11 @@ def main(config: JobConfig) -> None:
         composite_vocab = base_vocab + 1
     else:
         composite_vocab = base_vocab * exp_cfg.n_compartments + 1
+        if getattr(exp_cfg, "compartment_marker_token", False):
+            # c extra ids, one prefix marker per compartment, placed after the
+            # translation token. Marker for compartment i is composite_vocab + i
+            # BEFORE this widening, i.e. base_vocab*c + 1 + i.
+            composite_vocab += exp_cfg.n_compartments
     # Translation token id is always the last id in the vocab
     if tying_compact_vocab is not None:
         translation_token_id_cfg = tying_compact_vocab
@@ -1295,35 +1711,32 @@ def main(config: JobConfig) -> None:
         translation_token_id_cfg = base_vocab
     else:
         translation_token_id_cfg = base_vocab * exp_cfg.n_compartments
-    # Auto-resume from latest checkpoint if present; else init from scratch
-    # Prefer the highest step-* or rolling checkpoint, whichever is newer.
-    ckpt_root = os.path.join(out_dir, "checkpoints")
-    ckpt_dir = os.path.join(ckpt_root, "latest")  # fallback
-    best_named_dir = None
-    best_named_iter = -1
-    if os.path.isdir(ckpt_root):
-        # Find highest named checkpoint
-        step_dirs = [
-            d for d in os.listdir(ckpt_root)
-            if d.startswith("step-") and os.path.isdir(os.path.join(ckpt_root, d))
-        ]
-        if step_dirs:
-            best_step_dir = max(step_dirs, key=lambda d: int(d.split("-", 1)[1]))
-            best_named_iter = int(best_step_dir.split("-", 1)[1])
-            best_named_dir = os.path.join(ckpt_root, best_step_dir)
-            ckpt_dir = best_named_dir
-
-        # Check rolling checkpoint (may be newer than highest named)
-        rolling_dir = os.path.join(ckpt_root, "_rolling")
-        rolling_state_path = os.path.join(rolling_dir, "trainer_state.json")
-        if os.path.exists(rolling_state_path):
-            try:
-                with open(rolling_state_path) as f:
-                    rolling_iter = json.load(f).get("iter_num", -1)
-                if rolling_iter > best_named_iter:
-                    ckpt_dir = rolling_dir
-            except (json.JSONDecodeError, OSError):
-                pass  # corrupt rolling checkpoint — ignore it
+    # Auto-resume from the newest resumable checkpoint; else init from scratch.
+    # Raises if the run has progress on disk that cannot be resumed, rather than
+    # silently starting over and overwriting it.
+    _resume = ckpt_utils.find_resume_checkpoint(out_dir)
+    # A path that cannot exist, so "nothing resumable" falls through to scratch
+    # init below. Deliberately NOT checkpoints/latest: that symlink points at
+    # the newest *named* checkpoint, which is exactly what must not be resumed.
+    ckpt_dir = (
+        _resume.path
+        if _resume
+        else os.path.join(out_dir, "checkpoints", "_no_resume_candidate")
+    )
+    # Fallback target for the rolling-rewind guard below: the newest resumable
+    # NAMED checkpoint. Stable only -- an annealed point is off the trunk's loss
+    # curve and must never be silently resumed as if it were on it.
+    _named = [
+        c
+        for c in ckpt_utils.iter_checkpoints(out_dir, include_rolling=False)
+        if c.resumable and c.phase == "stable"
+    ]
+    _best_named = max(_named, key=lambda c: c.iter_num, default=None)
+    best_named_dir = _best_named.path if _best_named else None
+    best_named_iter = _best_named.iter_num if _best_named else -1
+    rolling_iter = (
+        _resume.iter_num if _resume and _resume.name == ckpt_utils.ROLLING else -1
+    )
 
     dataloader_state: Optional[dict] = None
     if os.path.islink(ckpt_dir) or os.path.isdir(ckpt_dir):
@@ -1336,8 +1749,20 @@ def main(config: JobConfig) -> None:
                     trainer_state = json.load(f)
                 iter_num = trainer_state["iter_num"]
                 best_val_loss = trainer_state.get("best_val_loss", 1e9)
-                # Load model state
-                model_state_dict = torch.load(model_ckpt, map_location=device)
+                # Load model state.
+                #
+                # map_location="cpu", NOT device. Loading straight onto CUDA raises
+                # "Attempting to deserialize object on a CUDA device but
+                # torch.cuda.is_available() is False" whenever the GPU is not ready
+                # on the claiming node — and the except-branch below then treats a
+                # perfectly good rolling checkpoint as "corrupt" and silently
+                # rewinds to the last NAMED checkpoint, which additionally drops
+                # Adam state because named checkpoints carry no optimizer. The ORC
+                # pool logs show this firing 19 times (plus 11 more from ECC errors
+                # on bad nodes), with single runs thrown back to step-500000 four
+                # times over. load_state_dict moves tensors to the right device
+                # itself, so CPU-loading costs nothing.
+                model_state_dict = torch.load(model_ckpt, map_location="cpu")
                 # convert torch.compile state dict back to regular state dict
                 unwanted_prefix = "_orig_mod."
                 for k, v in list(model_state_dict.items()):
@@ -1347,13 +1772,40 @@ def main(config: JobConfig) -> None:
                 # Load optimizer state if present
                 opt_ckpt = os.path.join(ckpt_dir, "optimizer.pt")
                 if os.path.exists(opt_ckpt):
-                    checkpoint["optimizer"] = torch.load(opt_ckpt, map_location=device)
-                # Load dataloader state if present
-                dl_ckpt = os.path.join(ckpt_dir, "dataloader.pt")
-                if os.path.exists(dl_ckpt):
-                    dataloader_state = torch.load(dl_ckpt, map_location="cpu")
+                    checkpoint["optimizer"] = torch.load(opt_ckpt, map_location="cpu")
+                # Load dataloader state if present.
+                #
+                # weights_only=False is REQUIRED here, not a convenience. Torch 2.6
+                # flipped the default to True, which refuses to unpickle anything but
+                # tensors — and SyntheticTokenStream's n-gram sampler state is numpy
+                # (per-chain xorshift states + context window), so every ladder run's
+                # rolling checkpoint raises `Unsupported global: numpy._core.
+                # multiarray._reconstruct`. The except-branch below then reports that
+                # as "corrupt rolling checkpoint" and silently resumes from the last
+                # NAMED checkpoint instead, which for these runs is 262k steps stale.
+                # The file is one we wrote ourselves, so unpickling it is safe.
+                # This RANK's state, not rank 0's. See load_dataloader_state.
+                dataloader_state = load_dataloader_state(ckpt_dir, ddp_rank or 0)
             except Exception as e:
                 if "_rolling" in str(ckpt_dir):
+                    # Refuse to SILENTLY rewind. This fallback previously turned an
+                    # unreadable rolling checkpoint into a quiet resume from the last
+                    # named checkpoint — which, with named steps as sparse as
+                    # 700k -> 1M, can discard a quarter-million steps while the run
+                    # looks healthy. A warning in a log nobody is tailing is not
+                    # enough. If the loss is more than one rolling interval, abort and
+                    # make a human decide; set TC_ALLOW_ROLLING_REWIND=1 to override.
+                    rewind = rolling_iter - best_named_iter
+                    if rewind > ROLLING_CHECKPOINT_INTERVAL and os.environ.get(
+                        "TC_ALLOW_ROLLING_REWIND"
+                    ) != "1":
+                        raise RuntimeError(
+                            f"rolling checkpoint at iter {rolling_iter} failed to load "
+                            f"({type(e).__name__}: {e}); falling back to the newest named "
+                            f"checkpoint at iter {best_named_iter} would discard {rewind} "
+                            f"steps. Refusing. Fix the load, or set "
+                            f"TC_ALLOW_ROLLING_REWIND=1 to accept the rewind."
+                        ) from e
                     print(f"WARNING: corrupt rolling checkpoint, falling back to named: {e}")
                     checkpoint = None
                     dataloader_state = None
@@ -1368,7 +1820,7 @@ def main(config: JobConfig) -> None:
                                 trainer_state = json.load(f)
                             iter_num = trainer_state["iter_num"]
                             best_val_loss = trainer_state.get("best_val_loss", 1e9)
-                            model_state_dict = torch.load(model_ckpt, map_location=device)
+                            model_state_dict = torch.load(model_ckpt, map_location="cpu")
                             unwanted_prefix = "_orig_mod."
                             for k, v in list(model_state_dict.items()):
                                 if k.startswith(unwanted_prefix):
@@ -1376,10 +1828,10 @@ def main(config: JobConfig) -> None:
                             checkpoint = {"model_state_dict": model_state_dict}
                             opt_ckpt = os.path.join(ckpt_dir, "optimizer.pt")
                             if os.path.exists(opt_ckpt):
-                                checkpoint["optimizer"] = torch.load(opt_ckpt, map_location=device)
-                            dl_ckpt = os.path.join(ckpt_dir, "dataloader.pt")
-                            if os.path.exists(dl_ckpt):
-                                dataloader_state = torch.load(dl_ckpt, map_location="cpu")
+                                checkpoint["optimizer"] = torch.load(opt_ckpt, map_location="cpu")
+                            dataloader_state = load_dataloader_state(
+                                ckpt_dir, ddp_rank or 0
+                            )
                 else:
                     raise
     if checkpoint is not None:
@@ -1420,6 +1872,12 @@ def main(config: JobConfig) -> None:
                     False
                     if config.experiment.shared_token_embeddings
                     else config.model.weight_tying
+                ),
+                "icl_enabled": config.experiment.icl_mode != "none",
+                "icl_vocab_size": (
+                    config.experiment.icl_vocab_size
+                    if config.experiment.icl_mode != "none"
+                    else 0
                 ),
             }
         )
@@ -1469,6 +1927,12 @@ def main(config: JobConfig) -> None:
                     if config.experiment.shared_token_embeddings
                     else config.model.weight_tying
                 ),
+                "icl_enabled": config.experiment.icl_mode != "none",
+                "icl_vocab_size": (
+                    config.experiment.icl_vocab_size
+                    if config.experiment.icl_mode != "none"
+                    else 0
+                ),
             }
         )
         model = GPT(gptconf)
@@ -1516,6 +1980,20 @@ def main(config: JobConfig) -> None:
         optimizer.add_param_group({"params": dann_module.parameters(), "weight_decay": 0.0})
     if checkpoint is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])  # pyright: ignore[reportArgumentType]
+    elif checkpoint is not None and iter_num > 0:
+        # Resuming mid-run with NO optimizer state: Adam restarts from zero
+        # moments. This used to happen silently, because named checkpoints carry
+        # no optimizer.pt and the key check above just skips the restore — so a
+        # transient load failure of _rolling would fall back to a named
+        # checkpoint and quietly wipe the moments. Say it loudly instead; an
+        # unexplained loss bump hundreds of thousands of steps later is not
+        # something anyone should have to reverse-engineer.
+        print(
+            f"WARNING: resuming at iter {iter_num} with NO optimizer state — Adam "
+            f"moments reset to zero. Expect a transient loss bump. This is expected "
+            f"only when deliberately seeding from a weights-only checkpoint; if this "
+            f"run resumed from _rolling, something is wrong."
+        )
     checkpoint = None  # free up memory
 
     # compile the model
@@ -1562,6 +2040,15 @@ def main(config: JobConfig) -> None:
             base_vocab,
             cast(int, exp_cfg.max_compartments),
             exp_cfg.n_compartments,
+            constant_records=total_examples if assignments_path is None else None,
+            shuffle_seed=(base_seed if config.data.shuffle else None),
+            bpe_variant_expansion=float(getattr(exp_cfg, "bpe_variant_expansion", 0.0) or 0.0),
+            bpe_variant_tokenizer=getattr(exp_cfg, "bpe_variant_tokenizer", ""),
+            bpe_variant_seed=int(base_seed),
+            bpe_variant_freq_pattern=train_bin,
+            shared_output_vocab=bool(getattr(exp_cfg, 'shared_output_vocab', False)),
+            compartment_marker_base=(base_vocab * exp_cfg.n_compartments + 1
+                if getattr(exp_cfg, 'compartment_marker_token', False) else None),
             permute_tokens=exp_cfg.permute_tokens_per_compartment,
             permutations_path=(
                 permutations_path if exp_cfg.permute_tokens_per_compartment else None
@@ -1586,6 +2073,15 @@ def main(config: JobConfig) -> None:
                 base_vocab,
                 cast(int, exp_cfg.max_compartments),
                 exp_cfg.n_compartments,
+                constant_records=total_examples if assignments_path is None else None,
+                shuffle_seed=(base_seed if config.data.shuffle else None),
+                bpe_variant_expansion=float(getattr(exp_cfg, "bpe_variant_expansion", 0.0) or 0.0),
+                bpe_variant_tokenizer=getattr(exp_cfg, "bpe_variant_tokenizer", ""),
+                bpe_variant_seed=int(base_seed),
+                bpe_variant_freq_pattern=train_bin,
+                shared_output_vocab=bool(getattr(exp_cfg, 'shared_output_vocab', False)),
+                compartment_marker_base=(base_vocab * exp_cfg.n_compartments + 1
+                    if getattr(exp_cfg, 'compartment_marker_token', False) else None),
                 permute_tokens=exp_cfg.permute_tokens_per_compartment,
                 permutations_path=(
                     permutations_path
@@ -1672,12 +2168,18 @@ def main(config: JobConfig) -> None:
             return None
         out = {}
         model.eval()
+        _icl_eval = (
+            getattr(config.experiment, "icl_mode", "none") == "dual_stream"
+        )
+        _icl_V_eval = getattr(config.experiment, "icl_vocab_size", 0)
+        _icl_mask_p_eval = float(getattr(config.experiment, "icl_mask_p", 0.0))
         for split in ["train", "val"]:
             # Reset the validation data loader to ensure deterministic eval on the same
             # data
             if split == "val":
                 val_loader.reset()
             losses = torch.zeros(eval_iters)
+            icl_losses = torch.zeros(eval_iters) if _icl_eval else None
             for k in range(eval_iters):
                 batch = val_loader.next_batch()
                 if isinstance(batch, tuple) and len(batch) == 3:
@@ -1687,37 +2189,71 @@ def main(config: JobConfig) -> None:
                     Cval = None
                 X, Y = X.to(device, non_blocking=True), Y.to(device, non_blocking=True)
                 Cval = Cval.to(device, non_blocking=True) if Cval is not None else None
+                _icl_idx_eval = None
+                _icl_tgt_eval = None
+                _icl_mask_eval = None
+                if _icl_eval:
+                    # Deterministic per-example salt derived from sum of first
+                    # 4 canonical tokens — same example always hashes the same
+                    # way across eval runs. Mixed with a Knuth constant for
+                    # spread.
+                    _salt = (
+                        X[:, :4].clamp(min=0).sum(dim=1).to(torch.int64)
+                        * 2654435761
+                    )
+                    _mixed_X = X.clamp(min=0).to(torch.int64) * 2654435761 + _salt.unsqueeze(1)
+                    _mixed_Y = Y.clamp(min=0).to(torch.int64) * 2654435761 + _salt.unsqueeze(1)
+                    _icl_idx_eval = (_mixed_X & (_icl_V_eval - 1)).to(X.dtype)
+                    _icl_tgt_eval = (_mixed_Y & (_icl_V_eval - 1)).to(Y.dtype)
+                    _icl_idx_eval = torch.where(X >= 0, _icl_idx_eval, X)
+                    _icl_tgt_eval = torch.where(Y >= 0, _icl_tgt_eval, Y)
+                    if _icl_mask_p_eval > 0.0:
+                        # Deterministic mask per (split, k) for reproducibility
+                        _gen = torch.Generator(device=device).manual_seed(
+                            1234567 + (1 if split == "val" else 0) * 1_000_000 + k
+                        )
+                        _icl_mask_eval = (
+                            torch.rand(X.shape, generator=_gen, device=device)
+                            < _icl_mask_p_eval
+                        )
                 with ctx:
                     # mark cudagraph step begin if available to avoid output overwrite
                     torch.compiler.cudagraph_mark_step_begin()
-                    result = model(X, Y, compartment_ids=Cval)
-                    loss = result[1]  # works for both 2-tuple and 3-tuple
+                    if _icl_eval:
+                        _, loss, _, icl_loss_v = model(
+                            X, Y, compartment_ids=Cval,
+                            icl_idx=_icl_idx_eval, icl_targets=_icl_tgt_eval,
+                            icl_mask=_icl_mask_eval,
+                        )
+                    else:
+                        result = model(X, Y, compartment_ids=Cval)
+                        loss = result[1]  # works for both 2-tuple and 3-tuple
                 losses[k] = loss.item()
+                if _icl_eval and icl_loss_v is not None:
+                    icl_losses[k] = icl_loss_v.item()
             out[split] = losses.mean()
+            if _icl_eval:
+                out[f"{split}_icl"] = icl_losses.mean()
         model.train()
         return out
 
-    # # learning rate decay scheduler (cosine with warmup)
-    # def get_lr(it):
-    #     # 1) linear warmup for warmup_iters steps
-    #     if it < warmup_iters:
-    #         return learning_rate * (it + 1) / (warmup_iters + 1)
-    #     # 2) if it > lr_decay_iters, return min learning rate
-    #     if it > lr_decay_iters:
-    #         return min_lr
-    #     # 3) in between, use cosine decay down to min learning rate
-    #     decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    #     assert 0 <= decay_ratio <= 1
-    #     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
-    #     return min_lr + coeff * (learning_rate - min_lr)
-
-    # learning rate decay scheduler (warmup and no decay)
     def get_lr(it):
-        # 1) linear warmup for warmup_iters steps
-        if it < warmup_iters:
-            return learning_rate * (it + 1) / (warmup_iters + 1)
-        # 2) if it > lr_decay_iters, return target learning rate
-        return learning_rate
+        # `it` is the GLOBAL iteration number, restored from trainer_state.json,
+        # so this is a pure function of position in the lineage: a run preempted
+        # mid-decay resumes on the LR it would have had rather than restarting
+        # the decay. See src/lr_schedule.py for why that property is
+        # load-bearing for the branch/anneal layout.
+        return lr_schedule.lr_at(
+            it,
+            peak=learning_rate,
+            warmup_iters=warmup_iters,
+            min_lr=min_lr,
+            schedule=schedule,
+            decay_lr=decay_lr,
+            lr_decay_iters=lr_decay_iters,
+            decay_start_iter=decay_start_iter,
+            decay_end_iter=decay_end_iter,
+        )
 
     # logging
     wandb_buffer_enabled = config.logging.wandb_buffer
@@ -1767,6 +2303,142 @@ def main(config: JobConfig) -> None:
             settings=wandb.Settings(init_timeout=300),
         )
 
+    # InfoNCE alignment pool (optional)
+    infonce_pool = None
+    infonce_mode = "wikimatrix"
+    if config.experiment.infonce_enabled:
+        infonce_mode = getattr(config.experiment, "infonce_pool_mode", "wikimatrix")
+        if infonce_mode == "wikimatrix":
+            if not config.experiment.infonce_pool_path:
+                raise ValueError("experiment.infonce_pool_path must be set when infonce_enabled")
+            from src.infonce import InfoNCEPool, compute_infonce_loss
+            infonce_pool = InfoNCEPool(
+                pool_path=config.experiment.infonce_pool_path,
+                pool_frac=config.experiment.infonce_pool_frac,
+                pool_seed=config.experiment.infonce_pool_seed,
+                process_rank=ddp_rank or 0,
+                zh_token_offset=config.experiment.infonce_zh_token_offset,
+            )
+            print0(
+                f"[infonce] mode=wikimatrix pool_frac={config.experiment.infonce_pool_frac} -> "
+                f"{infonce_pool.n_keep:,} of {infonce_pool.n_total:,} pairs"
+            )
+        elif infonce_mode == "compartment":
+            from src.infonce import CompartmentOriginalPool, compute_infonce_compartment_loss
+            # Load the same permutations the data loader uses (if any).
+            perms_for_infonce = None
+            if config.experiment.permute_input_tokens_per_compartment:
+                _perms_path = os.path.join(out_dir, "permutations.npy")
+                if os.path.exists(_perms_path):
+                    perms_for_infonce = np.load(_perms_path)
+            infonce_pool = CompartmentOriginalPool(
+                train_bin_glob=config.data.train_bin,
+                seq_len=config.model.block_size,
+                base_vocab=config.model.vocab_size,
+                permutations=perms_for_infonce,
+                process_rank=ddp_rank or 0,
+                seed=config.experiment.infonce_pool_seed,
+            )
+            print0(
+                f"[infonce] mode=compartment pool_tokens={infonce_pool.total_tokens:,} "
+                f"perms={'yes' if perms_for_infonce is not None else 'no'}"
+            )
+        elif infonce_mode == "bio_decl_qa":
+            from src.infonce import BioDeclQAPool, compute_infonce_loss
+            if not config.experiment.infonce_pool_decl_path:
+                raise ValueError("experiment.infonce_pool_decl_path must be set")
+            if not config.experiment.infonce_pool_qa_path:
+                raise ValueError("experiment.infonce_pool_qa_path must be set")
+            infonce_pool = BioDeclQAPool(
+                decl_path=config.experiment.infonce_pool_decl_path,
+                qa_path=config.experiment.infonce_pool_qa_path,
+                qa_offset=config.experiment.infonce_pool_qa_offset,
+                process_rank=ddp_rank or 0,
+                seed=config.experiment.infonce_pool_seed,
+            )
+            print0(
+                f"[infonce] mode=bio_decl_qa n_persons={infonce_pool.n_persons:,} "
+                f"qa_offset={config.experiment.infonce_pool_qa_offset}"
+            )
+        else:
+            raise ValueError(f"unknown infonce_pool_mode: {infonce_mode}")
+        # Resolve infonce_layer (default to mid-trunk if -1)
+        infonce_layer = config.experiment.infonce_layer
+        if infonce_layer < 0:
+            infonce_layer = config.model.n_layer // 2
+        print0(
+            f"[infonce] layer={infonce_layer}, n={config.experiment.infonce_n}, "
+            f"tau={config.experiment.infonce_tau}, every={config.experiment.infonce_every}, "
+            f"lambda={config.experiment.infonce_lambda}"
+        )
+    else:
+        infonce_layer = None
+    # Per-rank RNG for compartment-pair sampling (one-time init).
+    if infonce_mode == "compartment":
+        _infonce_pair_rng = np.random.default_rng(
+            config.experiment.infonce_pool_seed + 100 + (ddp_rank or 0)
+        )
+
+    # Seed-anneal permutation pool. Drawn once from training.seed; identical on
+    # every rank so the schedule is globally coherent. Row 0 = identity so the
+    # post-anneal tail trains on natural data. Rows 1..n-1 are fresh random
+    # permutations under the matching mode. See ExperimentConfig docstring.
+    # Pool stored as int32 for vocab mode (n*V can hit ~1 GB); compartment mode
+    # is trivially small so keep long. Row-gather + gather-along-dim-1 preserve
+    # int32; result cast to X.dtype at the end.
+    _seed_anneal_pool = None
+    _seed_anneal_n = 0
+    _seed_anneal_L_examples = 0
+    _seed_anneal_pool_override_active = False
+    if (
+        config.experiment.permutation_schedule == "seed_anneal"
+        and config.experiment.permutation_mode != "none"
+    ):
+        import math as _math
+        _seed_anneal_L_iters = int(config.experiment.permutation_anneal_iters)
+        if _seed_anneal_L_iters <= 0:
+            raise ValueError(
+                "permutation_schedule='seed_anneal' requires "
+                "permutation_anneal_iters > 0"
+            )
+        _seed_anneal_L_examples = _seed_anneal_L_iters * effective_batch_size
+        _seed_anneal_pool_override = int(config.experiment.permutation_pool_size)
+        if _seed_anneal_pool_override > 0:
+            _seed_anneal_n = _seed_anneal_pool_override
+            _seed_anneal_pool_override_active = True
+        else:
+            _seed_anneal_n = int(round(_math.sqrt(_seed_anneal_L_examples)))
+        _pool_seed = int(config.training.seed) + 20260618
+        _pool_gen = torch.Generator(device="cpu").manual_seed(_pool_seed)
+        _base_vocab_pool = config.model.vocab_size
+        _n_comp_pool = config.experiment.n_compartments
+        if config.experiment.permutation_mode == "vocab":
+            _pool = torch.empty(
+                (_seed_anneal_n, _base_vocab_pool), dtype=torch.int32
+            )
+            _pool[0] = torch.arange(_base_vocab_pool, dtype=torch.int32)
+            for _s in range(1, _seed_anneal_n):
+                _pool[_s] = torch.randperm(
+                    _base_vocab_pool, generator=_pool_gen
+                ).to(torch.int32)
+            _seed_anneal_pool = _pool.to(device)
+        elif config.experiment.permutation_mode == "compartment":
+            _pool = torch.empty(
+                (_seed_anneal_n, _n_comp_pool), dtype=torch.long
+            )
+            _pool[0] = torch.arange(_n_comp_pool, dtype=torch.long)
+            for _s in range(1, _seed_anneal_n):
+                _pool[_s] = torch.randperm(_n_comp_pool, generator=_pool_gen)
+            _seed_anneal_pool = _pool.to(device)
+        _pool_bytes = _seed_anneal_pool.element_size() * _seed_anneal_pool.numel()
+        print0(
+            f"[seed_anneal] mode={config.experiment.permutation_mode} "
+            f"L_iters={_seed_anneal_L_iters} "
+            f"L_examples={_seed_anneal_L_examples} n={_seed_anneal_n} "
+            f"pool_shape={tuple(_seed_anneal_pool.shape)} "
+            f"pool_MB={_pool_bytes/1024**2:.1f}"
+        )
+
     # training loop
     batch0 = train_loader.next_batch()  # fetch the very first batch
     if isinstance(batch0, tuple) and len(batch0) == 3:
@@ -1782,14 +2454,26 @@ def main(config: JobConfig) -> None:
         cast(GPT, model.module) if ddp else cast(GPT, model)
     )  # unwrap DDP container if needed
     running_mfu = -1.0
-    while True:
+    # ``max_iters`` is the number of optimizer updates, not the final
+    # zero-based iteration label. Assignment budgets use the same convention.
+    while iter_num < max_iters:
         # Check for preemption signal (GPU rescheduling)
         if _preempt_requested.is_set():
+            # Every rank writes its own dataloader position; only master writes
+            # the weights. A preempt that saved rank 0's position alone would
+            # make the requeued job train all ranks on identical data.
+            if not master_process:
+                _save_rolling_checkpoint(
+                    out_dir, raw_model, optimizer, train_loader,
+                    val_loader, iter_num, best_val_loss,
+                    rank=ddp_rank or 0, master=False,
+                )
             if master_process:
                 print(f"[preempt] SIGUSR1 received at iter {iter_num} — saving checkpoint and exiting")
                 _save_rolling_checkpoint(
                     out_dir, raw_model, optimizer, train_loader,
                     val_loader, iter_num, best_val_loss,
+                    rank=ddp_rank or 0, master=True,
                 )
                 if wandb_log and wandb_buffer_enabled:
                     wandb_flush_buffer()
@@ -1816,47 +2500,79 @@ def main(config: JobConfig) -> None:
                     f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
                 )
                 if wandb_log and master_process:
-                    wandb_log_or_buffer(
-                        {
-                            "iter": iter_num,
-                            "train/loss": losses["train"],
-                            "val/loss": losses["val"],
-                            "lr": lr,
-                            "mfu": running_mfu * 100,  # convert to percentage
-                        },
-                        step=iter_num,
-                    )
+                    _eval_metrics: dict[str, Any] = {
+                        "iter": iter_num,
+                        "train/loss": losses["train"],
+                        "val/loss": losses["val"],
+                        "lr": lr,
+                        "mfu": running_mfu * 100,  # convert to percentage
+                    }
+                    if "val_icl" in losses:
+                        _eval_metrics["train/icl_loss"] = losses["train_icl"]
+                        _eval_metrics["val/icl_loss"] = losses["val_icl"]
+                    wandb_log_or_buffer(_eval_metrics, step=iter_num)
             if losses is not None and losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
 
-        # Save checkpoints only at explicitly specified steps
+        # Save checkpoints only at log-spaced steps
+        # Every rank persists its OWN stream position at exactly the iterations
+        # that produce a resumable checkpoint; the master-only block below writes
+        # weights and optimizer state. Conditions here are rank-uniform, so this
+        # needs no collective -- deliberately, since the preempt path above is
+        # not provably rank-uniform and a collective there would deadlock.
+        if (
+            not master_process
+            and iter_num in checkpoint_steps
+            and iter_num > 0
+            and iter_num in full_state_iters
+        ):
+            save_dataloader_state(
+                _checkpoint_dir(os.path.join(out_dir, "checkpoints"), iter_num),
+                train_loader, val_loader, ddp_rank or 0,
+            )
+
         if (
             master_process
-            and (iter_num % eval_interval == 0 or iter_num in checkpoint_steps)
+            and iter_num in checkpoint_steps
             and iter_num > 0
         ):
             ck_root = os.path.join(out_dir, "checkpoints")
-            step_dir = os.path.join(ck_root, f"step-{iter_num:06d}")
+            step_dir = _checkpoint_dir(ck_root, iter_num)
             os.makedirs(step_dir, exist_ok=True)
-            print(f"saving checkpoint to {step_dir}")
-            # Write all checkpoint files before updating the latest symlink,
-            # so a SIGKILL can't leave latest pointing at an incomplete checkpoint.
-            torch.save(raw_model.state_dict(), os.path.join(step_dir, "model.pt"))
-            torch.save(optimizer.state_dict(), os.path.join(step_dir, "optimizer.pt"))
+            save_full_state = iter_num in full_state_iters
+            print(
+                f"saving checkpoint to {step_dir}"
+                + (" (+optimizer: resumable)" if save_full_state else "")
+            )
+            # Named (log-spaced) checkpoints: model weights (in bf16) + metadata.
+            # Weights are bf16 (halves size, negligible precision loss — eval casts
+            # to bf16 anyway). Optimizer state is 5.9x the weights, so it is written
+            # only at the points named in full_state_at_tokens; everywhere else
+            # _rolling covers preemption. A checkpoint without optimizer.pt is
+            # therefore not resumable, and the resume path will not select it.
+            named_state = {
+                k: (v.to(torch.bfloat16) if v.is_floating_point() else v)
+                for k, v in raw_model.state_dict().items()
+            }
+            torch.save(named_state, os.path.join(step_dir, "model.pt"))
             # Save DANN discriminator state
             if dann_enabled and dann_module is not None:
                 raw_dann = dann_module.module if isinstance(dann_module, DDP) else dann_module
                 torch.save(raw_dann.state_dict(), os.path.join(step_dir, "dann_discriminators.pt"))
-            # Save dataloader state for resumption
-            dl_state = {"train": train_loader.state_dict()}
-            if val_loader is not None:
-                dl_state["val"] = val_loader.state_dict()
-            torch.save(dl_state, os.path.join(step_dir, "dataloader.pt"))
+            if save_full_state:
+                # fp32 optimizer state, deliberately not downcast: this exists to
+                # be resumed from, and bf16 moments would perturb the trajectory.
+                torch.save(optimizer.state_dict(), os.path.join(step_dir, "optimizer.pt"))
+                save_dataloader_state(step_dir, train_loader, val_loader, ddp_rank or 0)
+            # trainer_state.json LAST — its presence is what marks the checkpoint
+            # complete, so it must not appear before optimizer.pt.
             with open(os.path.join(step_dir, "trainer_state.json"), "w") as f:
                 json.dump(
                     {
                         "iter_num": iter_num,
                         "best_val_loss": float(best_val_loss),
+                        "tokens": iter_num * tokens_per_iter,
+                        "phase": "annealed" if is_anneal_child else "stable",
                     },
                     f,
                 )
@@ -1868,16 +2584,23 @@ def main(config: JobConfig) -> None:
             if os.path.islink(latest):
                 try:
                     cur_target = os.readlink(latest)
-                    cur_step = int(cur_target.split("-", 1)[1])
-                    if iter_num < cur_step:
+                    # Compare by iter_num read from the target itself. Parsing the
+                    # directory name worked only for step-* and would silently
+                    # ValueError (and overwrite) on tok-* names.
+                    cur_iter = ckpt_utils.checkpoint_iter(
+                        os.path.join(ck_root, cur_target)
+                    )
+                    if cur_iter is not None and iter_num < cur_iter:
                         should_update_latest = False
                         print(f"WARNING: not updating latest symlink: current {cur_target} "
-                              f"is newer than step-{iter_num}")
-                except (ValueError, IndexError):
+                              f"is newer than iter {iter_num}")
+                except (ValueError, IndexError, OSError):
                     pass  # malformed symlink target — overwrite it
             if should_update_latest:
                 tmp_link = latest + f".tmp.{os.getpid()}"
-                os.symlink(os.path.basename(step_dir), tmp_link)
+                # relpath, not basename: an annealed checkpoint lives one level
+                # down in annealed/, and basename would produce a dangling link.
+                os.symlink(os.path.relpath(step_dir, ck_root), tmp_link)
                 os.replace(tmp_link, latest)
             # Flush buffered wandb logs now that checkpoint is durable
             if wandb_log and master_process and wandb_buffer_enabled:
@@ -1885,25 +2608,326 @@ def main(config: JobConfig) -> None:
 
         # Rolling "latest" checkpoint for preemption resilience.
         # Skip if a named checkpoint was already saved this step.
+        # NOT gated on master_process: every rank must record its own stream
+        # position. _save_rolling_checkpoint writes weights only for master.
         if (
-            master_process
-            and ROLLING_CHECKPOINT_INTERVAL > 0
+            ROLLING_CHECKPOINT_INTERVAL > 0
             and iter_num > 0
             and iter_num % ROLLING_CHECKPOINT_INTERVAL == 0
-            and not (iter_num % eval_interval == 0 or iter_num in checkpoint_steps)
+            # Skip only when this step ALREADY writes a resumable checkpoint.
+            # The old condition skipped at every NAMED step, but named checkpoints
+            # are weights-only unless the step is in full_state_iters -- so on a
+            # run slow enough that the wall lands inside the dense early
+            # checkpoint region, every rolling save was suppressed and the job
+            # ended with nothing resumable. Observed on the H100 twin: dense
+            # named steps cover every multiple of 1000 up to 10,000, the first
+            # rolling save would have been iter 11,000, and 24h reached ~9,800.
+            # The run was unresumable by construction.
+            and iter_num not in full_state_iters
         ):
             _save_rolling_checkpoint(
                 out_dir, raw_model, optimizer, train_loader,
                 val_loader, iter_num, best_val_loss,
+                rank=ddp_rank or 0, master=master_process,
             )
 
         if iter_num == 0 and eval_only:
             break
 
+        # Per-example permutation pretraining. Two modes:
+        #   - "vocab" (for c=1): a fraction `_frac` of the V token IDs are
+        #     deterministically selected per example and permuted among
+        #     themselves. Outside that subset, identity mapping. So _frac=1.0
+        #     is a full vocab permutation; _frac=0 is identity.
+        #   - "compartment" (for c>1): a fraction `_frac` of token positions
+        #     in the (B, T+1) underlying sequence get a uniformly-random
+        #     compartment in [0, n_comp); the rest keep the example's natural
+        #     compartment. Both X composite IDs and compartment_ids C are
+        #     remapped consistently.
+        # Schedule selects how _frac evolves with iter_num. The actual
+        # permutation application happens INSIDE the micro_step loop below
+        # (each microstep gets a fresh permutation).
+        _perm_mode = config.experiment.permutation_mode
+        _perm_cliff = config.experiment.permutation_cliff_step
+        _perm_sched = config.experiment.permutation_schedule
+        _perm_floor = float(getattr(config.experiment, "permutation_floor", 0.0))
+        if _perm_mode != "none":
+            if _perm_sched == "seed_anneal":
+                # _frac unused by this schedule (seed pool drives it). Keep 1.0
+                # for logging so "permutation active" is trivially visible in
+                # wandb; the actual seed count k is logged separately below.
+                _frac = 1.0
+            elif _perm_cliff > 0 and iter_num < _perm_cliff:
+                if _perm_sched == "sharp":
+                    _frac = 1.0
+                elif _perm_sched == "linear":
+                    _frac = max(_perm_floor, 1.0 - iter_num / _perm_cliff)
+                else:
+                    _frac = _perm_floor
+            else:
+                # Post-cliff (or cliff_step=0): hold at the floor. This makes
+                # the floor a "constant residual permutation rate" — set
+                # cliff_step=0 + a positive floor to get pure constant-rate
+                # training (variant B).
+                _frac = _perm_floor
+        else:
+            _frac = 0.0
+        _permute_active_frac = _frac  # capture for wandb logging
+        # Representative k for seed_anneal (from rank-0, micro-0, batch-0 j).
+        _permute_active_k = None
+        if _perm_sched == "seed_anneal" and _seed_anneal_n > 0:
+            _n_sa = _seed_anneal_n
+            _j_rep = iter_num * gradient_accumulation_steps * batch_size * ddp_world_size
+            if _j_rep >= _n_sa * _n_sa:
+                _permute_active_k = 1
+            else:
+                _permute_active_k = max(1, _n_sa - (_j_rep // _n_sa))
+
+        # ICL dual-stream pretraining hash function.
+        # Per-example salt drawn fresh each microstep. icl_idx[b, t] is a
+        # deterministic multiplicative-hash mapping from canonical token IDs
+        # into [0, icl_vocab_size). Stable within an example, different
+        # across examples.
+        _icl_mode = config.experiment.icl_mode
+        _icl_V = config.experiment.icl_vocab_size
+        _icl_lambda = config.experiment.icl_lambda
+        _icl_mask_p = float(getattr(config.experiment, "icl_mask_p", 0.0))
+        _icl_MULT = 2654435761  # Knuth's multiplicative constant; coprime with 2^k.
+
+        def _icl_hash(toks, salt):
+            """Hash canonical token IDs to ICL token IDs.
+            toks: (B, T) int64 in [0, V).
+            salt: (B,) int64 per-example salt.
+            Returns: (B, T) int64 in [0, icl_V).
+            """
+            # Broadcast salt over T positions. Use bitwise-and modulus since
+            # icl_V is a power of two.
+            mixed = toks * _icl_MULT + salt.unsqueeze(1)
+            return (mixed & (_icl_V - 1)).clamp(min=0)
+
+        def _seed_anneal_seed_indices(Bsz):
+            """Compute per-example seed indices for seed_anneal schedule.
+            Returns a (B,) long tensor on `device`. Rank-interleaved global
+            index: j_global = W * (t*G*B + m*B + b) + rank.
+            """
+            n = _seed_anneal_n
+            _W = ddp_world_size
+            _r = ddp_rank or 0
+            _start = int(config.experiment.permutation_anneal_start_iter)
+            _iter_eff = max(0, iter_num - _start)
+            _base_j = _W * (
+                _iter_eff * gradient_accumulation_steps * Bsz
+                + micro_step * Bsz
+            ) + _r
+            _b_arange = torch.arange(Bsz, device=device, dtype=torch.long)
+            j_global = _base_j + _b_arange * _W  # (B,)
+            if iter_num < _start:
+                # Pre-anneal: force identity, no pair loss (handled elsewhere).
+                return torch.zeros(Bsz, device=device, dtype=torch.long)
+            if _seed_anneal_pool_override_active:
+                # Fixed-pool ablation: uniformly sample seed_idx ∈ [0, n) for
+                # the entire anneal window (L_examples), drop to 0 after.
+                _post_anneal = j_global >= _seed_anneal_L_examples
+                _seed_idx = j_global % n
+                _seed_idx = torch.where(
+                    _post_anneal, torch.zeros_like(_seed_idx), _seed_idx
+                )
+                return _seed_idx.long()
+            _post_anneal = j_global >= (n * n)
+            _phase_idx = torch.div(j_global, n, rounding_mode="floor")
+            _k = torch.clamp(n - _phase_idx, min=1, max=n)  # (B,)
+            _j_in_phase = j_global - _phase_idx * n  # (B,) in [0, n)
+            # Even-remainder mapping: seed = min(floor(j_in_phase*k/n), k-1)
+            _seed_idx = torch.minimum(
+                torch.div(_j_in_phase * _k, n, rounding_mode="floor"),
+                _k - 1,
+            )
+            _seed_idx = torch.where(
+                _post_anneal, torch.zeros_like(_seed_idx), _seed_idx
+            )
+            return _seed_idx.long()
+
+        def _apply_seed_anneal_perm(X, Y, C, seed_idx):
+            """Apply the seed-anneal permutation for the given per-example
+            seed indices. Same math as the seed_anneal path in _maybe_permute
+            but with externally-supplied seed_idx so pair paths can drive it.
+            """
+            _base_vocab = config.model.vocab_size
+            _n_comp = config.experiment.n_compartments
+            if _perm_mode == "vocab":
+                _p = _seed_anneal_pool.index_select(0, seed_idx)
+                _Xp = torch.gather(_p, 1, X.clamp(min=0).long())
+                _Yp = torch.gather(_p, 1, Y.clamp(min=0).long())
+                Xn = torch.where(X >= 0, _Xp.to(X.dtype), X)
+                Yn = torch.where(Y >= 0, _Yp.to(Y.dtype), Y)
+                return Xn, Yn, C
+            if _perm_mode == "compartment":
+                Bsz, Tsz = X.shape
+                _sigma = _seed_anneal_pool.index_select(0, seed_idx)
+                _natural_comp = torch.zeros(
+                    (Bsz, Tsz + 1), dtype=torch.long, device=device
+                )
+                _natural_comp[:, :Tsz] = (X // _base_vocab).long()
+                _natural_comp[:, Tsz] = (Y[:, -1] // _base_vocab).long()
+                _natural_comp_idx = _natural_comp.clamp(0, _n_comp - 1)
+                _new_comp = torch.gather(_sigma, 1, _natural_comp_idx).to(X.dtype)
+                _trans_id = _base_vocab * _n_comp
+                _base_X = X % _base_vocab
+                _base_Y = Y % _base_vocab
+                _new_X = _base_X + _new_comp[:, :Tsz] * _base_vocab
+                _new_Y = _base_Y + _new_comp[:, 1:] * _base_vocab
+                _keep_X = (X < 0) | (X == _trans_id)
+                _keep_Y = (Y < 0) | (Y == _trans_id)
+                Xn = torch.where(_keep_X, X, _new_X)
+                Yn = torch.where(_keep_Y, Y, _new_Y)
+                Cn = C
+                if C is not None:
+                    Cn = torch.where(_keep_X, C, _new_comp[:, :Tsz].to(C.dtype))
+                return Xn, Yn, Cn
+            return X, Y, C
+
+        def _seed_anneal_partner(seed_idx, phase_k):
+            """Deterministic partner seed derived from seed_idx and phase_k.
+            partner = (seed_idx + 1 + hash % (k-1)) mod k. Guaranteed
+            different from seed_idx when k >= 2. At k=1 caller must skip."""
+            n = _seed_anneal_n
+            Bsz = seed_idx.shape[0]
+            _r = ddp_rank or 0
+            _W = ddp_world_size
+            _base_j = _W * (
+                iter_num * gradient_accumulation_steps * Bsz
+                + micro_step * Bsz
+            ) + _r
+            _b_arange = torch.arange(Bsz, device=device, dtype=torch.long)
+            j_global = _base_j + _b_arange * _W
+            # Cheap deterministic per-example scramble
+            h = (j_global * 2654435761) & 0x7FFFFFFF
+            shift = h % torch.clamp(phase_k - 1, min=1)
+            partner = (seed_idx + 1 + shift) % phase_k
+            return partner
+
+        def _maybe_permute(X, Y, C):
+            """Apply per-example permutation to the current batch.
+            Called at the top of each micro_step so every accumulated batch
+            sees fresh permutations. No-op when _frac == 0.0.
+            """
+            if _frac <= 0.0:
+                return X, Y, C
+            _base_vocab = config.model.vocab_size
+            _n_comp = config.experiment.n_compartments
+            # ---- seed_anneal schedule path ----
+            if (
+                _perm_sched == "seed_anneal"
+                and _seed_anneal_pool is not None
+            ):
+                Bsz = X.shape[0]
+                _seed_idx = _seed_anneal_seed_indices(Bsz)  # (B,)
+                if _perm_mode == "vocab":
+                    # Gather rows: (B, V) permutations per example.
+                    _p = _seed_anneal_pool.index_select(0, _seed_idx)
+                    _Xp = torch.gather(_p, 1, X.clamp(min=0).long())
+                    _Yp = torch.gather(_p, 1, Y.clamp(min=0).long())
+                    X = torch.where(X >= 0, _Xp.to(X.dtype), X)
+                    Y = torch.where(Y >= 0, _Yp.to(Y.dtype), Y)
+                elif _perm_mode == "compartment":
+                    Bsz, Tsz = X.shape
+                    _sigma = _seed_anneal_pool.index_select(0, _seed_idx)  # (B, n_comp)
+                    _natural_comp = torch.zeros(
+                        (Bsz, Tsz + 1), dtype=torch.long, device=device
+                    )
+                    _natural_comp[:, :Tsz] = (X // _base_vocab).long()
+                    _natural_comp[:, Tsz] = (Y[:, -1] // _base_vocab).long()
+                    # Ignore tokens (X<0) and translation tokens (X==trans_id
+                    # -> X//V == n_comp) produce out-of-range gather indices.
+                    # Clamp so the gather stays in bounds; the _keep_X/Y masks
+                    # below discard the resulting junk at those positions.
+                    _natural_comp_idx = _natural_comp.clamp(0, _n_comp - 1)
+                    _new_comp = torch.gather(
+                        _sigma, 1, _natural_comp_idx
+                    ).to(X.dtype)
+                    _trans_id = _base_vocab * _n_comp
+                    _base_X = X % _base_vocab
+                    _base_Y = Y % _base_vocab
+                    _new_X = _base_X + _new_comp[:, :Tsz] * _base_vocab
+                    _new_Y = _base_Y + _new_comp[:, 1:] * _base_vocab
+                    _keep_X = (X < 0) | (X == _trans_id)
+                    _keep_Y = (Y < 0) | (Y == _trans_id)
+                    X = torch.where(_keep_X, X, _new_X)
+                    Y = torch.where(_keep_Y, Y, _new_Y)
+                    if C is not None:
+                        C = torch.where(
+                            _keep_X, C, _new_comp[:, :Tsz].to(C.dtype)
+                        )
+                return X, Y, C
+            if _perm_mode == "vocab":
+                # Vectorized B-independent partial vocab permutations.
+                # Per-example construction:
+                #   1. Sample subset S_b of size n_perm from [0, V) (random).
+                #   2. Sample a within-S_b shuffle pi_b.
+                #   3. Build p_b: identity, with p_b[S_b[k]] = S_b[pi_b[k]].
+                #   4. Apply p_b to X_b and Y_b via gather.
+                Bsz, _ = X.shape
+                _n_perm = max(1, int(_frac * _base_vocab))
+                # (B, n_perm): random subset S of [0, V) per example
+                _S = torch.argsort(
+                    torch.rand((Bsz, _base_vocab), device=device), dim=1
+                )[:, :_n_perm]
+                # (B, n_perm): within-S shuffle indices
+                _pi = torch.argsort(
+                    torch.rand((Bsz, _n_perm), device=device), dim=1
+                )
+                # _targets[b, k] = S[b, pi[b, k]]
+                _targets = torch.gather(_S, 1, _pi)
+                # Build p of shape (B, V): identity, scattered at S positions
+                _p = (
+                    torch.arange(_base_vocab, device=device)
+                    .unsqueeze(0)
+                    .expand(Bsz, _base_vocab)
+                    .contiguous()
+                )
+                _p.scatter_(1, _S, _targets)
+                # Apply p to X, Y via gather; preserve negative (ignore) tokens.
+                _Xp = torch.gather(_p, 1, X.clamp(min=0).long())
+                _Yp = torch.gather(_p, 1, Y.clamp(min=0).long())
+                X = torch.where(X >= 0, _Xp.to(X.dtype), X)
+                Y = torch.where(Y >= 0, _Yp.to(Y.dtype), Y)
+            elif _perm_mode == "compartment":
+                Bsz, Tsz = X.shape
+                _natural_comp = torch.zeros(
+                    (Bsz, Tsz + 1), dtype=X.dtype, device=device
+                )
+                _natural_comp[:, :Tsz] = X // _base_vocab
+                _natural_comp[:, Tsz] = Y[:, -1] // _base_vocab
+                _rand_mask = torch.rand(
+                    (Bsz, Tsz + 1), device=device
+                ) < _frac
+                _random_comp = torch.randint(
+                    0, _n_comp, (Bsz, Tsz + 1), device=device
+                ).to(X.dtype)
+                _new_comp = torch.where(_rand_mask, _random_comp, _natural_comp)
+                _trans_id = _base_vocab * _n_comp
+                _base_X = X % _base_vocab
+                _base_Y = Y % _base_vocab
+                _new_X = _base_X + _new_comp[:, :Tsz] * _base_vocab
+                _new_Y = _base_Y + _new_comp[:, 1:] * _base_vocab
+                _keep_X = (X < 0) | (X == _trans_id)
+                _keep_Y = (Y < 0) | (Y == _trans_id)
+                X = torch.where(_keep_X, X, _new_X)
+                Y = torch.where(_keep_Y, Y, _new_Y)
+                if C is not None:
+                    C = torch.where(_keep_X, C, _new_comp[:, :Tsz].to(C.dtype))
+            return X, Y, C
+
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
         last_loss: Optional[torch.Tensor] = None
         last_dann_loss: Optional[float] = None
+        last_infonce_loss: Optional[float] = None
+        last_lm_loss_float: Optional[float] = None
+        last_icl_loss_float: Optional[float] = None
+        # stays None when grad_clip == 0 (clipping off), in which case no norm is
+        # computed and there is nothing to log -- not a silent zero.
+        last_grad_norm: Optional[float] = None
         for micro_step in range(gradient_accumulation_steps):
             if ddp:
                 # in DDP training we only need to sync gradients at the last micro step.
@@ -1914,13 +2938,130 @@ def main(config: JobConfig) -> None:
                 cast(DDP, model).require_backward_grad_sync = is_last_micro
                 if dann_enabled and dann_module is not None and isinstance(dann_module, DDP):
                     cast(DDP, dann_module).require_backward_grad_sync = is_last_micro
+            # ---- seed-anneal pair-cossim mode ----
+            # When permutation_pair_lambda > 0, during the anneal window, and
+            # k >= 2 for the current phase: build a 2B doubled batch (same
+            # underlying content under two seeds), forward once, and add
+            # `lambda * (1 - mean(cos(H_a, H_b)))` to the LM loss. Outside
+            # those conditions, fall through to the single-batch path.
+            _pair_lambda_val = float(getattr(config.experiment, "permutation_pair_lambda", 0.0))
+            _pair_active = (
+                _pair_lambda_val > 0.0
+                and _perm_sched == "seed_anneal"
+                and _seed_anneal_pool is not None
+                and _perm_mode in ("vocab", "compartment")
+            )
+            _pair_last_cos = None  # for wandb logging
+            if _pair_active:
+                _Bsz = X.shape[0]
+                _pair_start = int(config.experiment.permutation_anneal_start_iter)
+                if iter_num < _pair_start:
+                    _pair_active = False  # pre-anneal (delayed start)
+            if _pair_active:
+                _j_rep = ddp_world_size * (
+                    max(0, iter_num - _pair_start) * gradient_accumulation_steps * _Bsz
+                    + micro_step * _Bsz
+                )
+                if _seed_anneal_pool_override_active:
+                    # Fixed-pool ablation: k is constant at pool_size for the
+                    # whole anneal window (L_examples).
+                    if _j_rep >= _seed_anneal_L_examples:
+                        _pair_active = False  # post-anneal
+                    else:
+                        _k_rep = _seed_anneal_n
+                        if _k_rep < 2:
+                            _pair_active = False  # pool too small for a pair
+                else:
+                    _phase_rep = _j_rep // _seed_anneal_n
+                    if _j_rep >= _seed_anneal_n * _seed_anneal_n:
+                        _pair_active = False  # post-anneal
+                    else:
+                        _k_rep = _seed_anneal_n - _phase_rep
+                        if _k_rep < 2:
+                            _pair_active = False  # last phase, no valid partner
+
+            if _pair_active:
+                _Bsz = X.shape[0]
+                _seed_a = _seed_anneal_seed_indices(_Bsz)  # (B,)
+                _phase_k_tensor = torch.full(
+                    (_Bsz,), int(_k_rep), device=device, dtype=torch.long
+                )
+                _seed_b = _seed_anneal_partner(_seed_a, _phase_k_tensor)
+                X_a, Y_a, C_a = _apply_seed_anneal_perm(X, Y, C, _seed_a)
+                X_b, Y_b, C_b = _apply_seed_anneal_perm(X, Y, C, _seed_b)
+                X_pair = torch.cat([X_a, X_b], dim=0)
+                Y_pair = torch.cat([Y_a, Y_b], dim=0)
+                C_pair = torch.cat([C_a, C_b], dim=0) if C is not None else None
+                with ctx:
+                    torch.compiler.cudagraph_mark_step_begin()
+                    logits, lm_loss, H_pair = model(
+                        X_pair, Y_pair, compartment_ids=C_pair,
+                        return_last_hidden=True,
+                    )
+                    last_lm_loss_float = lm_loss.item()
+                    lm_loss = lm_loss / gradient_accumulation_steps
+                    _H_a = H_pair[:_Bsz]
+                    _H_b = H_pair[_Bsz:]
+                    _cos = torch.nn.functional.cosine_similarity(_H_a, _H_b, dim=-1)
+                    _cos_mean = _cos.mean()
+                    _pair_last_cos = float(_cos_mean.item())
+                    cossim_loss = (1.0 - _cos_mean) / gradient_accumulation_steps
+                    loss = lm_loss + _pair_lambda_val * cossim_loss
+                last_loss = loss
+                # Mirror the tail of the microstep body: prefetch next batch,
+                # then backward. Skips the ICL/DANN/InfoNCE branches (pair
+                # mode is only implemented for vocab-mode c=1 LM).
+                batch = train_loader.next_batch()
+                if isinstance(batch, tuple) and len(batch) == 3:
+                    X, Y, C = batch
+                else:
+                    X, Y = batch  # type: ignore[misc]
+                    C = None
+                X, Y = X.to(device, non_blocking=True), Y.to(device, non_blocking=True)
+                C = C.to(device, non_blocking=True) if C is not None else None
+                scaler.scale(loss).backward()
+                continue
+
+            # Apply per-example permutation INSIDE the accumulation loop so every
+            # microstep batch gets a fresh permutation (otherwise only the first
+            # microstep is permuted and the remaining grad_accum-1 microsteps
+            # train on natural data).
+            X, Y, C = _maybe_permute(X, Y, C)
+            # Compute ICL hashed views (per-example fresh salt) for the
+            # dual-stream input embedding and the ICL prediction head.
+            _icl_idx = None
+            _icl_targets = None
+            _icl_mask_t = None
+            if _icl_mode == "dual_stream":
+                _salt = torch.randint(
+                    1, (1 << 31) - 1, (X.shape[0],), device=device, dtype=X.dtype
+                )
+                _icl_idx = _icl_hash(X.clamp(min=0), _salt)
+                _icl_targets = _icl_hash(Y.clamp(min=0), _salt)
+                # Preserve ignore-index (-1) positions in the targets
+                _icl_idx = torch.where(X >= 0, _icl_idx, X)
+                _icl_targets = torch.where(Y >= 0, _icl_targets, Y)
+                if _icl_mask_p > 0.0:
+                    _icl_mask_t = (
+                        torch.rand(X.shape, device=device) < _icl_mask_p
+                    )
             with ctx:
                 torch.compiler.cudagraph_mark_step_begin()
                 if dann_enabled:
                     logits, lm_loss, layer_outputs = model(X, Y, compartment_ids=C)
+                elif _icl_mode == "dual_stream":
+                    logits, lm_loss, _, icl_loss = model(
+                        X, Y, compartment_ids=C,
+                        icl_idx=_icl_idx, icl_targets=_icl_targets,
+                        icl_mask=_icl_mask_t,
+                    )
                 else:
                     logits, lm_loss = model(X, Y, compartment_ids=C)
+                last_lm_loss_float = lm_loss.item()
                 lm_loss = lm_loss / gradient_accumulation_steps
+                if _icl_mode == "dual_stream":
+                    last_icl_loss_float = icl_loss.item()
+                    icl_loss = icl_loss / gradient_accumulation_steps
                 if dann_enabled and C is not None and dann_module is not None:
                     domain_labels = C[:, 0]  # per-sequence compartment
                     dann_loss = dann_module(layer_outputs, domain_labels, dann_lambda)
@@ -1928,6 +3069,61 @@ def main(config: JobConfig) -> None:
                     loss = lm_loss + dann_loss / gradient_accumulation_steps
                 else:
                     loss = lm_loss
+                if _icl_mode == "dual_stream":
+                    loss = loss + _icl_lambda * icl_loss
+            # InfoNCE alignment loss (auxiliary). Computed every infonce_every microsteps.
+            if (
+                infonce_pool is not None
+                and infonce_layer is not None
+                and (micro_step % config.experiment.infonce_every == 0)
+            ):
+                if infonce_mode == "wikimatrix":
+                    en_t, en_m, zh_t, zh_m = infonce_pool.sample(config.experiment.infonce_n)
+                    en_t_t = torch.from_numpy(en_t).to(device, non_blocking=True)
+                    zh_t_t = torch.from_numpy(zh_t).to(device, non_blocking=True)
+                    en_m_t = torch.from_numpy(en_m).to(device, non_blocking=True)
+                    zh_m_t = torch.from_numpy(zh_m).to(device, non_blocking=True)
+                    from src.infonce import compute_infonce_loss
+                    nce_loss = compute_infonce_loss(
+                        raw_model, en_t_t, en_m_t, zh_t_t, zh_m_t,
+                        capture_layer=infonce_layer,
+                        tau=config.experiment.infonce_tau,
+                        ctx=ctx,
+                    )
+                elif infonce_mode == "compartment":
+                    # compartment mode: pick two distinct compartments
+                    n_comp = config.experiment.n_compartments
+                    ci = int(_infonce_pair_rng.integers(0, n_comp))
+                    cj = int(_infonce_pair_rng.integers(0, n_comp - 1))
+                    if cj >= ci:
+                        cj += 1
+                    x_ci, x_cj = infonce_pool.sample_pairs(
+                        config.experiment.infonce_n, ci, cj
+                    )
+                    x_ci_t = torch.from_numpy(x_ci).to(device, non_blocking=True)
+                    x_cj_t = torch.from_numpy(x_cj).to(device, non_blocking=True)
+                    from src.infonce import compute_infonce_compartment_loss
+                    nce_loss = compute_infonce_compartment_loss(
+                        raw_model, x_ci_t, x_cj_t,
+                        capture_layer=infonce_layer,
+                        tau=config.experiment.infonce_tau,
+                        ctx=ctx,
+                    )
+                else:  # bio_decl_qa
+                    decl_t, decl_m, qa_t, qa_m = infonce_pool.sample(config.experiment.infonce_n)
+                    decl_t_t = torch.from_numpy(decl_t).to(device, non_blocking=True)
+                    qa_t_t = torch.from_numpy(qa_t).to(device, non_blocking=True)
+                    decl_m_t = torch.from_numpy(decl_m).to(device, non_blocking=True)
+                    qa_m_t = torch.from_numpy(qa_m).to(device, non_blocking=True)
+                    from src.infonce import compute_infonce_loss as _compute_infonce_loss
+                    nce_loss = _compute_infonce_loss(
+                        raw_model, decl_t_t, decl_m_t, qa_t_t, qa_m_t,
+                        capture_layer=infonce_layer,
+                        tau=config.experiment.infonce_tau,
+                        ctx=ctx,
+                    )
+                last_infonce_loss = nce_loss.item()
+                loss = loss + (config.experiment.infonce_lambda * nce_loss) / gradient_accumulation_steps
             last_loss = loss
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             batch = train_loader.next_batch()
@@ -1941,12 +3137,18 @@ def main(config: JobConfig) -> None:
             # backward pass, with gradient scaling if training in fp16
             scaler.scale(loss).backward()
         # clip the gradient
+        # clip_grad_norm_ returns the PRE-clip total norm, which it has to compute
+        # anyway. Keeping it is free and it is the only signal that distinguishes a
+        # loss spike caused by a gradient blow-up from one caused by a bad batch --
+        # without it every spike looks identical after the fact. Logged, not acted on.
         if grad_clip != 0.0:
             scaler.unscale_(optimizer)
             all_params = list(model.parameters())
             if dann_enabled and dann_module is not None:
                 all_params += list(dann_module.parameters())
-            torch.nn.utils.clip_grad_norm_(all_params, grad_clip)
+            last_grad_norm = float(
+                torch.nn.utils.clip_grad_norm_(all_params, grad_clip)
+            )
         # step the optimizer and scaler if training in fp16
         scaler.step(optimizer)
         scaler.update()
@@ -1968,8 +3170,9 @@ def main(config: JobConfig) -> None:
                 running_mfu = (
                     mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
                 )
+            gn = "" if last_grad_norm is None else f", gnorm {last_grad_norm:.3f}"
             print(
-                f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%"
+                f"iter {iter_num}: loss {lossf:.4f}{gn}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%"
             )
             if wandb_log and master_process:
                 log_metrics: dict[str, Any] = {
@@ -1979,15 +3182,103 @@ def main(config: JobConfig) -> None:
                     "mfu": running_mfu * 100,
                     "time_ms": dt * 1000,
                 }
+                if last_grad_norm is not None:
+                    log_metrics["train/grad_norm"] = last_grad_norm
                 if dann_enabled and last_dann_loss is not None:
                     log_metrics["train/dann_loss"] = last_dann_loss
+                if last_infonce_loss is not None:
+                    log_metrics["train/infonce_loss"] = last_infonce_loss
+                if config.experiment.permutation_mode != "none":
+                    log_metrics["train/permute_frac"] = _permute_active_frac
+                    if _permute_active_k is not None:
+                        log_metrics["train/permute_k"] = _permute_active_k
+                    if _pair_last_cos is not None:
+                        log_metrics["train/pair_cos"] = _pair_last_cos
+                if _icl_mode == "dual_stream":
+                    # train/loss above is the COMBINED loss (lm + lambda*icl)
+                    # for backward compat with existing dashboards. We also
+                    # log the unweighted pieces.
+                    if last_lm_loss_float is not None:
+                        log_metrics["train/lm_loss"] = last_lm_loss_float
+                    if last_icl_loss_float is not None:
+                        log_metrics["train/icl_loss"] = last_icl_loss_float
                 wandb_log_or_buffer(log_metrics, step=iter_num)
         iter_num += 1
         local_iter_num += 1
 
-        # termination conditions
-        if iter_num > max_iters:
-            break
+    # Terminal milestone checkpoint.
+    #
+    # The loop above is `while iter_num < max_iters` and the in-loop save runs
+    # BEFORE the increment, so the body never executes with iter_num == max_iters.
+    # A run configured with max_iters exactly equal to a milestone (the usual
+    # case: max_iters=1000000, and 1000000 is in checkpoint_steps) therefore
+    # completes all its optimizer updates and never writes that milestone — its
+    # deepest named checkpoint is the previous one (700000), which silently caps
+    # evaluation 300k steps short. Runs that DO have step-1000000 are the ones
+    # whose max_iters was larger, so they passed through it mid-training.
+    #
+    # Deliberately duplicated rather than factored out of the in-loop block: this
+    # is additive, so a mistake here cannot regress the path every existing run
+    # depends on.
+    if (
+        not master_process
+        and iter_num in checkpoint_steps
+        and iter_num > 0
+        and iter_num in full_state_iters
+    ):
+        save_dataloader_state(
+            _checkpoint_dir(os.path.join(out_dir, "checkpoints"), iter_num),
+            train_loader, val_loader, ddp_rank or 0,
+        )
+
+    if master_process and iter_num in checkpoint_steps and iter_num > 0:
+        ck_root = os.path.join(out_dir, "checkpoints")
+        step_dir = _checkpoint_dir(ck_root, iter_num)
+        if os.path.exists(os.path.join(step_dir, "model.pt")):
+            print(f"terminal checkpoint {os.path.basename(step_dir)} already exists — skipping")
+        else:
+            os.makedirs(step_dir, exist_ok=True)
+            # The end of a run is always full state: it is the point you would
+            # extend or fork a decay from later, and unlike an intermediate
+            # checkpoint it cannot be recreated by training forward again.
+            save_full_state = iter_num in full_state_iters
+            print(f"saving terminal checkpoint to {step_dir}")
+            named_state = {
+                k: (v.to(torch.bfloat16) if v.is_floating_point() else v)
+                for k, v in raw_model.state_dict().items()
+            }
+            torch.save(named_state, os.path.join(step_dir, "model.pt"))
+            if dann_enabled and dann_module is not None:
+                raw_dann = dann_module.module if isinstance(dann_module, DDP) else dann_module
+                torch.save(raw_dann.state_dict(), os.path.join(step_dir, "dann_discriminators.pt"))
+            if save_full_state:
+                torch.save(optimizer.state_dict(), os.path.join(step_dir, "optimizer.pt"))
+                save_dataloader_state(step_dir, train_loader, val_loader, ddp_rank or 0)
+            with open(os.path.join(step_dir, "trainer_state.json"), "w") as f:
+                json.dump(
+                    {
+                        "iter_num": iter_num,
+                        "best_val_loss": float(best_val_loss),
+                        "tokens": iter_num * tokens_per_iter,
+                        "phase": "annealed" if is_anneal_child else "stable",
+                    },
+                    f,
+                )
+            latest = os.path.join(ck_root, "latest")
+            should_update_latest = True
+            if os.path.islink(latest):
+                try:
+                    cur_iter = ckpt_utils.checkpoint_iter(
+                        os.path.join(ck_root, os.readlink(latest))
+                    )
+                    if cur_iter is not None:
+                        should_update_latest = iter_num >= cur_iter
+                except (ValueError, IndexError, OSError):
+                    pass  # malformed symlink target — overwrite it
+            if should_update_latest:
+                tmp_link = latest + f".tmp.{os.getpid()}"
+                os.symlink(os.path.relpath(step_dir, ck_root), tmp_link)
+                os.replace(tmp_link, latest)
 
     # Flush any remaining buffered wandb logs at normal termination
     if wandb_log and master_process and wandb_buffer_enabled:
@@ -1995,6 +3286,8 @@ def main(config: JobConfig) -> None:
 
     if ddp:
         destroy_process_group()
+    if active_run_lock is not None:
+        active_run_lock.release()
 
 
 if __name__ == "__main__":

@@ -63,6 +63,31 @@ def _slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
 
 
+def compute_expected_rids(sweep_path: str) -> dict[str, dict]:
+    """Compute expected {rid: overrides} by invoking sweep_runner in the project venv."""
+    venv_python = str(PROJECT_ROOT / ".supercomputer-venv" / "bin" / "python")
+    script = (
+        "import json, sys; "
+        f"sys.path.insert(0, {str(PROJECT_ROOT)!r}); "
+        "from sweep_runner import parse_sweep_yaml, expand_grid, build_config, deterministic_run_id; "
+        f"bt, proj, grp, params = parse_sweep_yaml({sweep_path!r}); "
+        "grid = expand_grid(params); "
+        "result = {}; "
+        "[result.__setitem__(deterministic_run_id(build_config(bt, ov)), ov) for ov in grid]; "
+        "json.dump(result, sys.stdout)"
+    )
+    try:
+        result = subprocess.run(
+            [venv_python, "-c", script],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+    except Exception:
+        pass
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Data collection
 # ---------------------------------------------------------------------------
@@ -80,12 +105,12 @@ def _cfg_hash_from_dict(d: dict) -> str:
     return hashlib.blake2s(s.encode(), digest_size=4).hexdigest()
 
 
-def scan_runs(project: str, group: str):
+def scan_runs(project: str, group: str, expected_rids: dict | None = None):
     """Scan output dirs. Return {rid: {iter_num, max_iters, mtime, size_tier, ...}}.
 
-    The rid is the canonical cfg_hash recomputed from config.json, so old-format
-    dirs (pre-deterministic run IDs) map to the same grid slot as new ones.
-    When cfg_hash can't be computed, falls back to the directory name prefix.
+    When *expected_rids* is provided, the rid is taken from the directory name
+    (which matches the sweep_runner's cfg_hash at claim time).  Otherwise, the
+    rid is recomputed from config.json for backward compatibility with old dirs.
     """
     base = Path(TC_STORAGE_ROOT) / "out" / _slug(project) / _slug(group)
     if not base.exists():
@@ -127,7 +152,13 @@ def scan_runs(project: str, group: str):
                 n_comp = cfg.get("experiment", {}).get("n_compartments", 0)
                 ratio_mode = cfg.get("experiment", {}).get("translation_ratio_mode", "")
                 ratio = cfg.get("experiment", {}).get("translation_ratio", 0.0)
-                rid = _cfg_hash_from_dict(cfg)
+                # Prefer dir_rid when it matches an expected sweep config
+                # (config.json has runtime-modified batch_size/grad_accum
+                # that produces a different hash than the original cfg_hash)
+                if expected_rids is not None and dir_rid in expected_rids:
+                    rid = dir_rid
+                else:
+                    rid = _cfg_hash_from_dict(cfg)
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -773,14 +804,19 @@ def build(sweep_name, configs, rid_to_job, eta_tracker, n_jobs_run, n_jobs_pend,
 # Main
 # ---------------------------------------------------------------------------
 
-def collect(project, group, grid_overrides, eta_tracker):
-    runs = scan_runs(project, group)
+def collect(project, group, grid_overrides, eta_tracker, expected_rids=None):
+    runs = scan_runs(project, group, expected_rids=expected_rids)
     done_rids = {
         rid for rid, info in runs.items()
         if info["max_iters"] > 0 and info["iter_num"] >= info["max_iters"]
     }
     lock_dir = Path(TC_STORAGE_ROOT) / "out" / _slug(project) / ".locks"
     rid_to_job, n_run, n_pend, rid_to_overrides = get_running_map(done_rids, lock_dir)
+
+    # Filter running map to only rids belonging to this sweep
+    if expected_rids:
+        expected_set = set(expected_rids)
+        rid_to_job = {r: v for r, v in rid_to_job.items() if r in expected_set}
 
     # Build config list from filesystem runs
     configs = []
@@ -810,23 +846,49 @@ def collect(project, group, grid_overrides, eta_tracker):
         })
         seen.add(rid)
 
-    # Fill in unclaimed (no run dir yet) from grid overrides
-    n_missing = len(grid_overrides) - len(configs)
-    for i in range(max(0, n_missing)):
-        ov = grid_overrides[i] if i < len(grid_overrides) else {}
-        configs.append({
-            "rid": f"_unclaimed_{i}",
-            "iter_num": 0,
-            "max_iters": 1_000_000,
-            "mtime": 0,
-            "size_tier": str(ov.get("model.size_tier", "?")),
-            "n_compartments": ov.get("experiment.n_compartments", 0),
-            "ratio_mode": str(ov.get("experiment.translation_ratio_mode", "?")),
-            "translation_ratio": ov.get("experiment.translation_ratio", 0),
-            "locked": False,
-        })
+    # Fill in unclaimed configs from expected rids
+    if expected_rids:
+        for rid, ov in expected_rids.items():
+            if rid in seen:
+                continue
+            configs.append({
+                "rid": rid,
+                "iter_num": 0,
+                "max_iters": 1_000_000,
+                "mtime": 0,
+                "size_tier": str(ov.get("model.size_tier", "?")),
+                "n_compartments": _to_int(ov.get("experiment.n_compartments", 0)),
+                "ratio_mode": str(ov.get("experiment.translation_ratio_mode", "?")),
+                "translation_ratio": _to_float(ov.get("experiment.translation_ratio", 0)),
+                "locked": (lock_dir / f"{rid}.lock").exists(),
+            })
+            seen.add(rid)
+    else:
+        # Fallback: fill from grid_overrides if expected_rids unavailable
+        n_missing = len(grid_overrides) - len(configs)
+        for i in range(max(0, n_missing)):
+            ov = grid_overrides[i] if i < len(grid_overrides) else {}
+            configs.append({
+                "rid": f"_unclaimed_{i}",
+                "iter_num": 0,
+                "max_iters": 1_000_000,
+                "mtime": 0,
+                "size_tier": str(ov.get("model.size_tier", "?")),
+                "n_compartments": ov.get("experiment.n_compartments", 0),
+                "ratio_mode": str(ov.get("experiment.translation_ratio_mode", "?")),
+                "translation_ratio": ov.get("experiment.translation_ratio", 0),
+                "locked": False,
+            })
 
     heartbeats = read_heartbeats(project)
+    # Filter heartbeats to workers training configs in this sweep
+    if expected_rids:
+        expected_set = set(expected_rids)
+        heartbeats = [
+            hb for hb in heartbeats
+            if hb.get("run_id") in expected_set
+            or hb.get("state") != "training"
+        ]
     return configs, rid_to_job, n_run, n_pend, heartbeats
 
 
@@ -843,10 +905,11 @@ def main():
     grid_overrides = expand_grid(params)
     console = Console()
     eta_tracker = ETATracker()
+    expected_rids = compute_expected_rids(args.sweep) or None
 
     if args.once:
         configs, rid_to_job, n_run, n_pend, heartbeats = collect(
-            project, group, grid_overrides, eta_tracker
+            project, group, grid_overrides, eta_tracker, expected_rids
         )
         hb = None if args.no_workers else heartbeats
         panel = Panel(
@@ -861,7 +924,7 @@ def main():
         while True:
             try:
                 configs, rid_to_job, n_run, n_pend, heartbeats = collect(
-                    project, group, grid_overrides, eta_tracker
+                    project, group, grid_overrides, eta_tracker, expected_rids
                 )
                 hb = None if args.no_workers else heartbeats
                 live.update(Panel(

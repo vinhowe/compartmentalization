@@ -6,7 +6,7 @@ from typing import Literal
 def compute_weights_map(
     n: int,
     t: float,
-    scaling: Literal["equal", "unequal"],
+    scaling: Literal["equal", "unequal", "single"],
     mode: Literal["compartment", "absolute"] = "compartment",
 ) -> dict[str, float]:
     """Compute sampling weights for compartments and translations.
@@ -17,7 +17,7 @@ def compute_weights_map(
         Number of compartments. Must be >= 1.
     t: float
         Translation ratio. Must be >= 0. When t = 0, no translation weights are created.
-    scaling: Literal["equal", "unequal"]
+    scaling: Literal["equal", "unequal", "single"]
         Base compartment weighting scheme.
     mode: Literal["compartment", "absolute"]
         How to interpret t:
@@ -47,6 +47,12 @@ def compute_weights_map(
         # ids in code are 0..n-1, corresponding to (i+1) / Z
         z = float(n * (n + 1) // 2)
         base_weights = [float(i + 1) / z for i in range(n)]
+    elif scaling == "single":
+        # All weight on compartment 0. Dead-weight c=1 control that keeps the
+        # n_compartments=N model architecture (embedding, lm_head over N*V)
+        # but funnels all training data to slot 0. Compartments 1..n-1 never
+        # receive gradient signal (with wd=0 they stay at init).
+        base_weights = [1.0] + [0.0] * (n - 1)
 
     # Mass split between compartments and translations
     if mode == "compartment":
