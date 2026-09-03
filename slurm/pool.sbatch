@@ -32,6 +32,16 @@
 #SBATCH --partition=cs3
 #SBATCH --account=dw87
 #SBATCH --qos=cs
+# Nodes with uncorrectable ECC / flaky GPUs. These do not merely fail a job:
+# before the checkpoint-loading fixes, a CUDA failure here made the worker fall
+# back to the newest NAMED checkpoint, silently rewinding the run by up to 200k
+# steps AND resetting Adam (named checkpoints carry no optimizer state). Single
+# reseed runs were thrown back to step-500000 four times over this way.
+#
+# Choosing a partition cannot avoid them: every node belongs to ~35 partitions
+# at once, so cs-1-1 is reachable from cs3, dwmatrix, m13h, eng and the rest
+# alike. --exclude is a NODE-level constraint and is the only thing that works.
+#SBATCH --exclude=cs-1-1,cs-1-2,m13l-2-1,dw-2-4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus=8
@@ -58,19 +68,40 @@ source .supercomputer-venv/bin/activate
 export WANDB_MODE=offline
 export UV_PROJECT_ENVIRONMENT="$TRAIN_DIR/.supercomputer-venv"
 
+# MANDATORY on cs-3-1 (B200). NVLink SHARP is advertised on that node and hangs
+# the first NCCL collective -- init_process_group succeeds, world_size prints,
+# and then the job sits forever with no error until its wallclock expires.
+# Verified 2026-08-07: a bare 2-GPU all_reduce hangs without this; with it,
+# 512MB all_reduce runs at 429 GB/s and 8-GPU DDP scales at 92%.
+#
+# Harmless on single-GPU workers (no collectives) and on non-Blackwell nodes,
+# so it is set unconditionally rather than guarded by hostname.
+export NCCL_NVLS_ENABLE=0
+
 echo "[pool] job=$SLURM_JOB_ID host=$(hostname) queue=$QUEUE out_root=$OUT_ROOT"
 nvidia-smi -L | head -8 || true
 
 # Sweep any leftover running/ configs back to pending/. Runs on startup and
 # again on graceful shutdown. The 'g<N>__' prefix is stripped so the original
 # basename is preserved (which also drives OUT_DIR/RUN_ID => resume).
+# Match ANY .toml in running/, not just g*__*.toml, and strip to after the LAST
+# "__". Two failures made this necessary:
+#   * an older pool tagged claims "<jobid>_g<N>__<orig>.toml", which begins with a
+#     digit, so the g*__ glob never matched it — five configs sat in running/
+#     owned by a dead job, invisible to every subsequent sweep.
+#   * "${base#g*__}" strips only a leading g-prefix, so requeuing a file that
+#     already carried one and re-claiming it produced
+#     "g2__<jobid>_g1__<orig>.toml". The basename drives OUT_DIR, so that starts
+#     a BRAND NEW run in a garbage directory instead of resuming.
+# Config basenames never contain "__" (asserted below), so "${base##*__}" is
+# exact and idempotent no matter how many prefixes have accreted.
 requeue_running() {
     shopt -s nullglob
-    for f in "$QUEUE"/running/g*__*.toml; do
+    for f in "$QUEUE"/running/*.toml; do
         base=$(basename "$f")
-        orig="${base#g*__}"
+        orig="${base##*__}"
         if mv "$f" "$QUEUE/pending/$orig" 2>/dev/null; then
-            echo "[pool] requeued: $orig"
+            echo "[pool] requeued: $base -> $orig"
         fi
     done
     shopt -u nullglob
@@ -128,6 +159,7 @@ worker() {
         CUDA_VISIBLE_DEVICES=$GPU \
             OUT_DIR="$RUN_OUT" \
             RUN_ID="$NAME" \
+            CONFIG_PATH="$CFG" \
             python train.py --job.config-file "$CFG" >> "$WLOG" 2>&1
         local rc=$?
 

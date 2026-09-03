@@ -38,7 +38,7 @@ from src.config.presets import apply_bpe16384_batch_config, apply_size_tier
 from src.experiment import cfg_hash, slug
 
 STORAGE_ROOT = os.environ.get(
-    "TC_STORAGE_ROOT", "/mnt/pccfs2/backed_up/vin/dev/translation-compression"
+    "TC_STORAGE_ROOT", "/nobackup/archive/grp/grp_pccl/vin/dev/translation-compression"
 )
 
 
@@ -905,6 +905,13 @@ def poll_loop(args):
     assignment_dir = os.path.join(STORAGE_ROOT, "out", project_slug, ".assignments")
     os.makedirs(assignment_dir, exist_ok=True)
     assignment_path = os.path.join(assignment_dir, f"{_worker_id_to_filename(wid)}.json")
+
+    # Clear any stale assignment from a previous job (e.g. leftover shutdown
+    # signal) so it doesn't immediately kill this fresh worker.
+    try:
+        os.remove(assignment_path)
+    except FileNotFoundError:
+        pass
 
     print(f"[sweep-poll] Worker {wid} polling {assignment_path}")
 

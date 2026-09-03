@@ -1,0 +1,53 @@
+# Reseed of 8-256-n8-tr05abs at seed 65
+
+[data]
+source = "pretokenized"
+train_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_train_*.bin"
+val_bin = "data/fineweb350B-dedup-bpe16384/fineweb350b-dedup_val_*.bin"
+uniform_seed = 64
+
+[model]
+n_layer = 8
+n_head = 8
+n_embd = 256
+block_size = 64
+vocab_size = 16384
+weight_tying = false
+use_rope = true
+rope_base = 10000.0
+
+[training]
+max_iters = 1000000
+eval_interval = 10000
+eval_iters = 1
+log_interval = 10
+always_save_checkpoint = true
+seed = 65
+batch_size = 256
+gradient_accumulation_steps = 8
+auto_batch_config = false
+
+[optimizer]
+learning_rate = 2e-05
+weight_decay = 0
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "translation-compression"
+wandb_run_name = "8-256-n8-tr05abs-s65"
+wandb_group = "8-256-reseed"
+
+[experiment]
+n_compartments = 8
+compartment_scaling = "equal"
+translation_ratio = 0.5
+translation_ratio_mode = "absolute"
+assignment_seed = 64
+max_compartments = 16
+use_compartment_embeddings = true
+permute_tokens_per_compartment = false
+permute_input_tokens_per_compartment = true

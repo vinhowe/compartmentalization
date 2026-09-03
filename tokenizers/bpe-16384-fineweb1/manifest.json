@@ -1,0 +1,45 @@
+{
+  "created_by": "scripts/train_tokenizer_fineweb.py",
+  "command": "scripts/train_tokenizer_fineweb.py --parquet-dir /mnt/pccfs2/backed_up/datasets/fineweb/sample-350BT/sample/350BT --vocab-size 16384 --output-dir tokenizers/bpe-16384-fineweb1 --max-chars 5000000000",
+  "git_sha": "ed3b4927eeeb0266f2456d14a715ecb94c589f9a-dirty",
+  "source": {
+    "dataset": "FineWeb (English) raw parquet",
+    "parquet_dir": "/mnt/pccfs2/backed_up/datasets/fineweb/sample-350BT/sample/350BT",
+    "files_available": 510,
+    "files_consumed": [
+      {
+        "file": "000_00000.parquet",
+        "docs": 1058636
+      },
+      {
+        "file": "000_00001.parquet",
+        "docs": 580868
+      }
+    ],
+    "text_column": "text",
+    "deduplicated": false,
+    "sha256": {
+      "000_00000.parquet": "84af0ddb3173accb65b5cb17f43d16798f650900eac5cfa14ae79680266f1195",
+      "000_00001.parquet": "33570c89c61bb19deb5ab0d2d20ef535c65de4948f70df84d0f9e02a3a607bb2"
+    }
+  },
+  "budget": {
+    "max_chars": 5000000000,
+    "chars_consumed": 5000001331
+  },
+  "trainer": {
+    "model": "BPE",
+    "vocab_size": 16384,
+    "min_frequency": 2,
+    "special_tokens": [
+      "<unk>",
+      "<s>",
+      "</s>",
+      "<pad>"
+    ],
+    "pre_tokenizer": "ByteLevel(add_prefix_space=False)"
+  },
+  "artifact_sha256": {
+    "tokenizer.json": "91ee3a1408afc4314c23417f79eadba15d49c6bee6d2607a61006fa8bfc23fae"
+  }
+}

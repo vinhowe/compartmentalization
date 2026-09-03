@@ -443,6 +443,8 @@ class AssignmentsDataLoader:
         # First id of the per-compartment prefix markers, or None to disable.
         # Compartment i's marker is marker_base + i.
         compartment_marker_base: Optional[int] = None,
+        # c-way in, 1-out: targets are base-vocab ids, inputs keep the offset.
+        shared_output_vocab: bool = False,
         # Seed for corpus read order; None reads shards and blocks in file order.
         # Identical on every rank on purpose -- rank disjointness comes from the
         # process_rank stride, so the union of what the ranks read does not
@@ -571,6 +573,7 @@ class AssignmentsDataLoader:
         # c=8 run's first two, and cross-c comparisons are not confounded by the
         # compartments having different tokenizers.
         self._marker_base = compartment_marker_base
+        self._shared_out = bool(shared_output_vocab)
         self._expand: Optional[list] = None
         # Unconsumed BASE tokens carried between examples. Compartment-agnostic,
         # so this splices nothing: it is the same contiguous stream either way.
@@ -957,8 +960,17 @@ class AssignmentsDataLoader:
                 # is asked to predict from the marker, which is the point.
                 mk = (self._marker_base + srcs[idx_comp][:, None]).astype(x_comp.dtype)
                 x_comp = np.concatenate([mk, x_comp[:, :-1]], axis=1)
+            # c-in/1-out: predict the SHARED base id, so every compartment maps
+            # its private input vocabulary onto one output space. `samples` is
+            # already the un-offset base ids; the marker branch above shifted the
+            # inputs by one, so shift the targets to match or they misalign by a
+            # position -- which would look like a merely harder task rather than
+            # a broken one.
+            src = samples if self._shared_out else x_comp
+            if self._shared_out and self._marker_base is not None:
+                src = np.concatenate([samples[:, :1], samples[:, :-1]], axis=1)
             y_comp = np.empty_like(x_comp)
-            y_comp[:, :-1] = x_comp[:, 1:]
+            y_comp[:, :-1] = src[:, 1:]
             y_comp[:, -1] = -1
 
         x_np[idx_comp] = x_comp
@@ -2034,6 +2046,7 @@ def main(config: JobConfig) -> None:
             bpe_variant_tokenizer=getattr(exp_cfg, "bpe_variant_tokenizer", ""),
             bpe_variant_seed=int(base_seed),
             bpe_variant_freq_pattern=train_bin,
+            shared_output_vocab=bool(getattr(exp_cfg, 'shared_output_vocab', False)),
             compartment_marker_base=(base_vocab * exp_cfg.n_compartments + 1
                 if getattr(exp_cfg, 'compartment_marker_token', False) else None),
             permute_tokens=exp_cfg.permute_tokens_per_compartment,
@@ -2066,6 +2079,7 @@ def main(config: JobConfig) -> None:
                 bpe_variant_tokenizer=getattr(exp_cfg, "bpe_variant_tokenizer", ""),
                 bpe_variant_seed=int(base_seed),
                 bpe_variant_freq_pattern=train_bin,
+                shared_output_vocab=bool(getattr(exp_cfg, 'shared_output_vocab', False)),
                 compartment_marker_base=(base_vocab * exp_cfg.n_compartments + 1
                     if getattr(exp_cfg, 'compartment_marker_token', False) else None),
                 permute_tokens=exp_cfg.permute_tokens_per_compartment,
@@ -2911,6 +2925,9 @@ def main(config: JobConfig) -> None:
         last_infonce_loss: Optional[float] = None
         last_lm_loss_float: Optional[float] = None
         last_icl_loss_float: Optional[float] = None
+        # stays None when grad_clip == 0 (clipping off), in which case no norm is
+        # computed and there is nothing to log -- not a silent zero.
+        last_grad_norm: Optional[float] = None
         for micro_step in range(gradient_accumulation_steps):
             if ddp:
                 # in DDP training we only need to sync gradients at the last micro step.
@@ -3120,12 +3137,18 @@ def main(config: JobConfig) -> None:
             # backward pass, with gradient scaling if training in fp16
             scaler.scale(loss).backward()
         # clip the gradient
+        # clip_grad_norm_ returns the PRE-clip total norm, which it has to compute
+        # anyway. Keeping it is free and it is the only signal that distinguishes a
+        # loss spike caused by a gradient blow-up from one caused by a bad batch --
+        # without it every spike looks identical after the fact. Logged, not acted on.
         if grad_clip != 0.0:
             scaler.unscale_(optimizer)
             all_params = list(model.parameters())
             if dann_enabled and dann_module is not None:
                 all_params += list(dann_module.parameters())
-            torch.nn.utils.clip_grad_norm_(all_params, grad_clip)
+            last_grad_norm = float(
+                torch.nn.utils.clip_grad_norm_(all_params, grad_clip)
+            )
         # step the optimizer and scaler if training in fp16
         scaler.step(optimizer)
         scaler.update()
@@ -3147,8 +3170,9 @@ def main(config: JobConfig) -> None:
                 running_mfu = (
                     mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
                 )
+            gn = "" if last_grad_norm is None else f", gnorm {last_grad_norm:.3f}"
             print(
-                f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%"
+                f"iter {iter_num}: loss {lossf:.4f}{gn}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%"
             )
             if wandb_log and master_process:
                 log_metrics: dict[str, Any] = {
@@ -3158,6 +3182,8 @@ def main(config: JobConfig) -> None:
                     "mfu": running_mfu * 100,
                     "time_ms": dt * 1000,
                 }
+                if last_grad_norm is not None:
+                    log_metrics["train/grad_norm"] = last_grad_norm
                 if dann_enabled and last_dann_loss is not None:
                     log_metrics["train/dann_loss"] = last_dann_loss
                 if last_infonce_loss is not None:

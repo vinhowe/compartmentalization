@@ -578,6 +578,13 @@ if __name__ == "__main__":
                 eval_model, config, _ = load_eval_model_from_checkpoint(
                     step_dir, experiment_dir, device
                 )
+                # Sequence length must come from the MODEL, not a constant. The
+                # byte-matched 131k-vocab control is trained at block_size=56 (64
+                # tokens x 4.078 B/tok would be 261 bytes of context; it is matched
+                # on BYTES, not tokens), so a hardcoded T=64 makes the forward pass
+                # assert 'Cannot forward sequence of length 64, block size is only 56'
+                # and the whole run fails to evaluate.
+                eval_block_size = int(getattr(config.model, "block_size", 64))
             except (RuntimeError, EOFError, OSError) as e:
                 msg = str(e)
                 if ("size mismatch" in msg
@@ -609,7 +616,7 @@ if __name__ == "__main__":
                             mode = src_source.split(":", 1)[1]
                             val_loader = UniformAssignedValLoader(
                                 B=32,
-                                T=64,
+                                T=eval_block_size,
                                 base_vocab_size=base_vocab_size,
                                 max_compartments=actual_model_compartments,
                                 assignment=assignment,
@@ -630,7 +637,7 @@ if __name__ == "__main__":
                             val_loader = SingleShardAssignedValLoader(
                                 src_source,
                                 B=32,
-                                T=64,
+                                T=eval_block_size,
                                 base_vocab_size=base_vocab_size,
                                 max_compartments=actual_model_compartments,
                                 assignment=assignment,
@@ -650,7 +657,7 @@ if __name__ == "__main__":
                             # Use uniform random data loader with seed 0 for validation
                             val_loader = UniformAssignedValLoader(
                                 B=32,
-                                T=64,
+                                T=eval_block_size,
                                 base_vocab_size=base_vocab_size,
                                 max_compartments=actual_model_compartments,
                                 assignment=assignment,
@@ -671,7 +678,7 @@ if __name__ == "__main__":
                             val_loader = SingleShardAssignedValLoader(
                                 str(val_bin_path),
                                 B=32,
-                                T=64,
+                                T=eval_block_size,
                                 base_vocab_size=base_vocab_size,
                                 max_compartments=actual_model_compartments,
                                 assignment=assignment,
@@ -693,9 +700,54 @@ if __name__ == "__main__":
                     batch_ref = []
                     batch_tgt = []
                     batch_trans = []
+                    # ICL dual-stream: collect parallel next-ICL losses.
+                    _icl_eval_active = bool(getattr(eval_model, "icl_enabled", False))
+                    _icl_eval_V = int(getattr(eval_model, "icl_vocab_size", 0)) if _icl_eval_active else 0
+                    _icl_mask_p_eval_pipe = float(
+                        getattr(config.experiment, "icl_mask_p", 0.0)
+                    ) if _icl_eval_active else 0.0
+                    _ICL_MULT = 2654435761
+                    batch_icl = []
                     for _ in range(N_EVAL_BATCHES):
                         x, y, cids = val_loader.next_batch()
-                        logits, _ = eval_model(x, y, compartment_ids=cids)
+                        if _icl_eval_active:
+                            # Deterministic per-example salt: sum of first 4
+                            # canonical tokens × Knuth constant. Same as the
+                            # in-training estimate_loss() path so wandb val
+                            # and val_metrics.json agree.
+                            _salt = (
+                                x[:, :4].clamp(min=0).sum(dim=1).to(torch.int64)
+                                * _ICL_MULT
+                            )
+                            _mixed_x = x.clamp(min=0).to(torch.int64) * _ICL_MULT + _salt.unsqueeze(1)
+                            _mixed_y = y.clamp(min=0).to(torch.int64) * _ICL_MULT + _salt.unsqueeze(1)
+                            _icl_x = (_mixed_x & (_icl_eval_V - 1)).to(x.dtype)
+                            _icl_y = (_mixed_y & (_icl_eval_V - 1)).to(y.dtype)
+                            _icl_x = torch.where(x >= 0, _icl_x, x)
+                            _icl_y = torch.where(y >= 0, _icl_y, y)
+                            _icl_mask_pipe = None
+                            if _icl_mask_p_eval_pipe > 0.0:
+                                # Deterministic mask seeded by batch index for reproducibility
+                                _gen_pipe = torch.Generator(device=x.device).manual_seed(
+                                    7654321 + len(batch_full)
+                                )
+                                _icl_mask_pipe = (
+                                    torch.rand(x.shape, generator=_gen_pipe, device=x.device)
+                                    < _icl_mask_p_eval_pipe
+                                )
+                            logits, _, icl_logits, _ = eval_model(
+                                x, y, compartment_ids=cids,
+                                icl_idx=_icl_x, icl_targets=_icl_y,
+                                icl_mask=_icl_mask_pipe,
+                            )
+                            icl_loss_f32 = F.cross_entropy(
+                                icl_logits.float().reshape(-1, icl_logits.size(-1)),
+                                _icl_y.reshape(-1).long(),
+                                ignore_index=-1,
+                            )
+                            batch_icl.append(icl_loss_f32.item())
+                        else:
+                            logits, _ = eval_model(x, y, compartment_ids=cids)
 
                         # Recompute loss in float32 to avoid bfloat16 quantization
                         loss_f32 = F.cross_entropy(
@@ -726,6 +778,8 @@ if __name__ == "__main__":
 
                     import numpy as _np
                     metrics_by_step[f"loss_{name}"][step_number] = float(_np.mean(batch_full))
+                    if _icl_eval_active and batch_icl:
+                        metrics_by_step[f"icl_loss_{name}"][step_number] = float(_np.mean(batch_icl))
                     if assignment.kind == 1:
                         metrics_by_step[f"loss_reference_{name}"][step_number] = float(_np.mean(batch_ref))
                         metrics_by_step[f"loss_target_{name}"][step_number] = float(_np.mean(batch_tgt))

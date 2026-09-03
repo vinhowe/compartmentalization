@@ -144,10 +144,18 @@ class LadderV2ConfigsAreV2(unittest.TestCase):
 class UnknownKeysAreFatalUnderV2(unittest.TestCase):
     """v2 rejects a field the code does not implement; v1 still only warns.
 
-    redesign-1b-lr4e-4-c8-100b-sharedout set `shared_output_vocab`, which exists
-    nowhere in the codebase. It was dropped with a warning, the config resolved
-    byte-identically to the plain c=8 arm, and ~693 A100-hours produced a
-    duplicate of a baseline instead of the ablation the run was named for.
+    The motivating incident: a config set `shared_output_vocab` and, read from a
+    checkout where that field did not exist, it was dropped with a warning and
+    the config resolved byte-identically to the plain c=8 arm. That reading was
+    WRONG -- the field was fully implemented on the machine the run executed on,
+    and the divergence between checkouts, not the config, was the real fault.
+    A legitimate 100B run was cancelled at 73% on the strength of it.
+
+    Both lessons survive. A silently ignored field is still the failure mode v2
+    exists to end, so v2 now raises. And the field used to test that must be one
+    that genuinely cannot exist -- using a real-but-unsynced field name is what
+    caused the original mistake, and would make this test fail the moment the
+    branches merged. Hence the deliberately absurd name below.
 
     The warning is kept for v1 because 115 of 226 archived configs carry the
     typo `always_save_checkpoints`, and failing them would break the archive.
@@ -165,19 +173,19 @@ vocab_size = 16384
 [experiment]
 n_compartments = 8
 max_compartments = 16
-shared_output_vocab = true
+no_such_field_will_ever_exist = true
 """
     V1_BAD = V2_BAD.replace("config_version = 2\n", "")
 
     def test_v2_rejects_unknown_key_via_parse_args(self):
         with self.assertRaises(ValueError) as ctx:
             ConfigManager().parse_args(["--job.config-file", _write(self.V2_BAD)])
-        self.assertIn("shared_output_vocab", str(ctx.exception))
+        self.assertIn("no_such_field_will_ever_exist", str(ctx.exception))
 
     def test_v2_rejects_unknown_key_via_load_from_toml_file(self):
         with self.assertRaises(ValueError) as ctx:
             ConfigManager().load_from_toml_file(_write(self.V2_BAD))
-        self.assertIn("shared_output_vocab", str(ctx.exception))
+        self.assertIn("no_such_field_will_ever_exist", str(ctx.exception))
 
     def test_v1_still_loads_with_only_a_warning(self):
         cfg = ConfigManager().parse_args(["--job.config-file", _write(self.V1_BAD)])

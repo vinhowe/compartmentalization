@@ -1,0 +1,46 @@
+[data]
+train_bin = "data/random_V2048_L64_N2048000000_seed64/random_train_*.bin"
+# train_bin = "data/random_V2048_L64_N2048000000_seed64/random_train_*.bin"
+
+[model]
+n_layer = 4
+n_head = 8
+n_embd = 256
+block_size = 64
+vocab_size = 2048
+weight_tying = false
+
+[training]
+max_iters = 10e6
+batch_size = 2048
+gradient_accumulation_steps = 1
+eval_interval = 500
+always_save_checkpoints = true
+eval_iters = 0
+seed = 64
+
+[optimizer]
+learning_rate = 6e-4
+# So adamw = adam
+weight_decay = 0
+
+[system]
+compile = true
+dtype = "bfloat16"
+
+[logging]
+wandb_log = true
+wandb_project = "memorize-replication"
+wandb_run_name = "single-domain-4-256-prototype"
+wandb_notes = "Higher learning rate on larger model(?)"
+wandb_group = "small-prototypes"
+
+[experiment]
+# Deterministic assignment generation
+# weights: compartment ids as "0", translations as "0>1"
+weights = { "0" = 1.0, "0>1" = 0.5, "1>0" = 0.5, "1" = 1.0 }
+max_compartments = 2
+total_examples = 1000000
+assignment_seed = 64
+shared_token_embeddings = false
+use_compartment_embeddings = false

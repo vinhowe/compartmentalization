@@ -21,6 +21,19 @@ _slug = slug
 
 def _canonical_cfg_dict(cfg: JobConfig) -> dict:
     d = asdict(cfg)
+    # Remove fields added after runs were already created, so that
+    # existing run hashes remain stable. Only fields whose default
+    # value (False/None/0) means "no behaviour change" are safe to
+    # strip — if a sweep actually sets them to a non-default value,
+    # they'll be included.
+    _STRIP_IF_DEFAULT = {
+        ("model", "copy_compartment_id_embeddings"): False,
+        ("experiment", "copy_compartment_id_embeddings"): False,
+    }
+    for (section, key), default in _STRIP_IF_DEFAULT.items():
+        if section in d and isinstance(d[section], dict):
+            if d[section].get(key) == default:
+                del d[section][key]
     return {
         **d,
         "lr": d["lr"],

@@ -733,12 +733,11 @@ def decide_submissions(
     if remaining <= 0:
         return {p.name: 0 for p in profiles}
 
-    # Total GPUs already provisioned (running + pending) across all profiles
-    total_provisioned_gpus = sum(
-        (info["running"] + info["pending"]) * p.gpus_per_job
-        for p, info in ((p, jobs_per_profile.get(p.name, {"running": 0, "pending": 0}))
-                        for p in profiles)
-    )
+    # Count GPUs already provisioned (running jobs only — pending may not start).
+    total_running_gpus = 0
+    for p in profiles:
+        info = jobs_per_profile.get(p.name, {"running": 0, "pending": 0})
+        total_running_gpus += info["running"] * p.gpus_per_job
 
     result: dict[str, int] = {}
     for profile in profiles:
@@ -750,14 +749,21 @@ def decide_submissions(
             result[profile.name] = 0
             continue
 
-        # Don't over-provision: only submit if remaining work exceeds current GPUs
-        if total_provisioned_gpus >= remaining:
+        # Don't submit if we already have more running GPUs than remaining
+        # configs — those workers would just sit idle.
+        if total_running_gpus >= remaining:
             result[profile.name] = 0
             continue
 
-        # Conservative: max 1 job per profile per cycle
-        result[profile.name] = 1
-        total_provisioned_gpus += profile.gpus_per_job
+        # Cap at remaining work, but still submit up to headroom otherwise.
+        gpus_needed = remaining - total_running_gpus
+        jobs_needed = min(headroom, -(-gpus_needed // profile.gpus_per_job))  # ceil div
+        result[profile.name] = jobs_needed
+        # Only count non-standby toward the running total so standby
+        # submissions don't block later profiles from getting jobs.
+        is_standby = "qos=standby" in profile.sbatch_flags or "qos=gstandby" in profile.sbatch_flags
+        if not is_standby:
+            total_running_gpus += jobs_needed * profile.gpus_per_job
 
     return result
 

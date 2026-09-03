@@ -74,6 +74,14 @@ def _build_and_load_model(config: JobConfig, model_file: Path, model_compartment
                 if config.experiment.shared_token_embeddings
                 else config.model.weight_tying
             ),
+            "icl_enabled": (
+                getattr(config.experiment, "icl_mode", "none") != "none"
+            ),
+            "icl_vocab_size": (
+                int(getattr(config.experiment, "icl_vocab_size", 0))
+                if getattr(config.experiment, "icl_mode", "none") != "none"
+                else 0
+            ),
         }
     )
     model = GPT(gptconf)

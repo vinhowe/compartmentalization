@@ -286,6 +286,20 @@ class Experiment:
     # a prefix marker. Unlike the embedding, a marker costs one position of
     # context per sequence -- the last content token is dropped so the length
     # stays T -- which is 0.1% of a 1024-token window.
+    # c-way input, 1-way output: read compartment i's private ids (t + i*V) but
+    # predict the SHARED base id (t). Alignment stops being optional and becomes
+    # required by the task.
+    #
+    # Purpose is a CEILING for the representational metric. We have a floor (an
+    # untrained model) and a null (different text) but no upper anchor, so a
+    # measured alignment of +0.23 has no denominator -- it could be most of what
+    # is achievable or a tenth of it. This arm is what the metric reads when
+    # compartments MUST converge.
+    #
+    # Loss is NOT comparable to a c-in/c-out run: the target space is V rather
+    # than c*V+1. Use it for alignment, not for cost.
+    shared_output_vocab: FlagConversionOff[bool] = False
+
     compartment_marker_token: FlagConversionOff[bool] = False
 
     bpe_variant_expansion: float = 0.0
