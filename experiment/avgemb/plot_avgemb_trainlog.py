@@ -60,11 +60,28 @@ def main():
         axes[0].plot(steps, smooth_log(steps, y), color=col, lw=1.4, label=label)
         if a != "control":
             axes[1].plot(steps, smooth_log(steps, y - yc), color=col, lw=1.4, label=label)
+    # c=1 reference. Training loss is not comparable to c=1's val loss directly, so use
+    # the formal-eval val-loss difference at 1M steps (c=1 minus the source c=8 run) as
+    # an offset from the control.
+    import json, sys as _sys
+    main_dir = Path("/mnt/pccfs2/backed_up/vin/dev/translation-compression/experiment")
+    _sys.path.insert(0, str(main_dir))
+    from _run_paths import C1_BASELINE_8_256
+    M = json.loads((main_dir / "val_metrics.json").read_text())
+    def at1m(k, c):
+        r = M[k]; i = r["checkpoints"].index(1_000_000)
+        return float(np.mean([r["metrics"][f"loss_compartment_{j}"][i] for j in range(c)]))
+    dc1 = at1m(C1_BASELINE_8_256, 1) - at1m("8-256-reseed/8-256-n8-tr01comp-s66", 8)
+    cs, _, cy = series["control"]
+    ctrl_level = np.mean(smooth_log(cs, cy)[cs >= cs[-1] - 5000])
+    for ax, y in ((axes[0], ctrl_level + dc1), (axes[1], dc1)):
+        ax.axhline(y, color="black", lw=0.8, ls="--")
+        ax.text(0.02, y, " c=1", transform=ax.get_yaxis_transform(), va="bottom", fontsize=7)
     axes[0].set_xscale("log")
-    axes[0].set_ylim(4.2, 7.5)
+    axes[0].set_ylim(3.9, 7.5)
     axes[0].set_ylabel("training loss (nats, smoothed)")
     axes[1].set_xscale("log")
-    axes[1].set_ylim(0, 3.5)
+    axes[1].set_ylim(dc1 - 0.1, 3.5)
     axes[1].axhline(0, color="black", lw=0.6, ls=":")
     axes[1].set_ylabel("loss minus control (nats)")
     for ax in axes:
