@@ -78,8 +78,9 @@ def main():
     panels = [("penalty", "English loss penalty vs c=1 (nats)", None),
               ("fisher_share", "other compartment's share\nof trunk Fisher", 0.5),
               ("neuron_share", "other compartment's share\nof neuron-ablation loss", 0.5),
-              ("fisher_cos", "trunk Fisher overlap\n(cosine, English vs other)", None)]
-    fig, axes = plt.subplots(1, len(panels), figsize=(12, 3.0))
+              ("fisher_cos", "trunk Fisher overlap\n(cosine, English vs other)", None),
+              ("neuron_corr", "neuron-necessity overlap\n(vs English split-half = 1)", 1.0)]
+    fig, axes = plt.subplots(1, len(panels), figsize=(14.5, 3.0))
     for ax, (k, title, ref) in zip(axes, panels):
         mu = np.array([summary[c][k][0] for c in conds])
         lo = np.array([summary[c][k][1] for c in conds])

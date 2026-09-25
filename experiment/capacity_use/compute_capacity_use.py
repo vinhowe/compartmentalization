@@ -69,10 +69,15 @@ CONDITIONS = {
 }
 
 
+# Copies of runs whose group lives on a mount some hosts cannot see (stage_archive_runs.sh).
+STAGED = Path(__file__).resolve().parent / "staged_runs"
+
+
 def resolve(key: str) -> Path:
-    p = RUNS / key
-    if p.is_dir():
-        return p
+    for root in (RUNS, STAGED):
+        p = root / key
+        if p.is_dir():
+            return p
     group, name = key.split("/", 1)
     hits = sorted(d for d in (RUNS / group).iterdir() if d.is_dir() and f"__{name}__" in d.name)
     assert len(hits) == 1, (key, hits)
@@ -234,6 +239,15 @@ def exact_ablation(model, taps, batches, kind, n_layer, n_units, unit_width):
 
 
 def run_one(job):
+    """One model; a failure is returned as a message so the rest of the pool keeps going."""
+    try:
+        return _run_one(job)
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        return f"FAILED {job[1]}", f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+
+
+def _run_one(job):
     cond, key, gpu, out_dir = job
     out_path = Path(out_dir) / f"{cond}__{key.replace('/', '__')}.json"
     if out_path.exists():
