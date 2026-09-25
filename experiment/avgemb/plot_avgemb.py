@@ -23,9 +23,11 @@ from _run_paths import C1_BASELINE_8_256  # noqa: E402
 START, C = 888_000, 8
 M = json.loads((MAIN / "experiment" / "val_metrics.json").read_text())
 FT = json.loads((MAIN / "experiment" / "finetune_val_metrics.json").read_text())
-ARMS = [("avgboth", "input + output rows averaged", "#e34948"),
-        ("avgwte", "input rows averaged", "#eda100"),
-        ("control", "unmodified continuation", "#2a78d6")]
+ARMS = [("8-256-avgemb", "avgboth", "input + output rows averaged", "#e34948"),
+        ("8-256-avgemb", "avgwte", "input rows averaged", "#eda100"),
+        ("8-256-avgemb-copy", "copyboth", "input + output rows copied from comp. 1", "#8f3bb8"),
+        ("8-256-avgemb-copy", "copywte", "input rows copied from comp. 1", "#1baf7a"),
+        ("8-256-avgemb", "control", "unmodified continuation", "#2a78d6")]
 
 
 def mean_loss(rec, c, i):
@@ -45,8 +47,11 @@ def main():
                          "axes.grid": True, "grid.alpha": 0.3, "grid.linewidth": 0.4})
     fig, axes = plt.subplots(1, 2, figsize=(9, 3.2))
     summary = {"c1_1M": c1, "c8_s66_1M": c8, "arms": {}}
-    for arm, label, col in ARMS:
-        r = M[f"8-256-avgemb/8-256-n8-tr01comp-s66-{arm}"]
+    for group, arm, label, col in ARMS:
+        key = f"{group}/8-256-n8-tr01comp-s66-{arm}"
+        if key not in M:
+            continue
+        r = M[key]
         steps = np.array(r["checkpoints"]) - START
         y = np.array([mean_loss(r, C, i) for i in range(len(steps))])
         summary["arms"][arm] = dict(zip(steps.tolist(), y.tolist()))
