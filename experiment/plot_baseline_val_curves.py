@@ -52,7 +52,7 @@ THREEUP_FIGSIZE = (2.4, 2.0)
 THREEUP_ADJUST = dict(left=0.24, right=0.96, bottom=0.22, top=0.96)
 
 
-def placeholder_panel(out, figsize, adjust):
+def placeholder_panel(out, figsize, adjust, text="placeholder", color="0.6"):
     """Empty panel with a layout's geometry, so a figure can be laid out
     before one of its panels exists."""
     setup_paper_style()
@@ -60,8 +60,8 @@ def placeholder_panel(out, figsize, adjust):
     ax.set_xticks([]); ax.set_yticks([])
     ax.grid(False)
     ax.set_xlabel(" "); ax.set_ylabel(" ")
-    ax.text(0.5, 0.5, "placeholder", transform=ax.transAxes,
-            ha="center", va="center", color="0.6")
+    ax.text(0.5, 0.5, text, transform=ax.transAxes,
+            ha="center", va="center", color=color)
     fig.subplots_adjust(**adjust)
     fig.savefig(out)
     plt.close(fig)
