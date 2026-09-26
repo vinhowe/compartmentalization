@@ -8,6 +8,7 @@ and the gap is larger for smaller scales (capacity-bound).
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -45,8 +46,10 @@ def scale_label(d: int) -> str:
     return f"{p:.1f}M"
 
 
-def plot_into(ax, metrics):
+def plot_into(ax, metrics, exclude=()):
     for d, runs in PANELS:
+        if d in exclude:
+            continue
         cs, finals = [], []
         for c, key in sorted(runs):
             if key not in metrics:
@@ -68,16 +71,21 @@ def plot_into(ax, metrics):
 
 
 def main():
+    # --no-1b drops the 1B line and writes *_no1b.pdf. The 1B runs trained with
+    # 8-GPU DDP, where every rank read nearly the same rows (~263 distinct of
+    # 2048 per step), so they saw ~16B tokens, not the ~131B of the other scales.
+    exclude = {1024} if "--no-1b" in sys.argv else set()
+    suffix = "_no1b" if exclude else ""
     setup_paper_style()
     metrics = json.loads(Path("val_metrics.json").read_text())
     fig, ax = plt.subplots(figsize=(3.3, 2.6))
-    plot_into(ax, metrics)
+    plot_into(ax, metrics, exclude)
     handles, labels = ax.get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=3,
                frameon=False, handlelength=1.3, handletextpad=0.5,
                columnspacing=1.2, bbox_to_anchor=(0.5, -0.02))
     fig.tight_layout(rect=(0, 0.13, 1, 1))
-    out = Path("../figures/loss_plateau.pdf")
+    out = Path(f"../figures/loss_plateau{suffix}.pdf")
     fig.savefig(out)
     print(f"  {out}")
     plt.close(fig)
@@ -86,14 +94,14 @@ def main():
     # for a 6-entry legend (the high-c values smush against the lines), so
     # legend lives below the chart.
     fig, ax = plt.subplots(figsize=(2.4, 2.0))
-    plot_into(ax, metrics)
+    plot_into(ax, metrics, exclude)
     handles, labels = ax.get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=3,
                frameon=False, handlelength=1.0,
                handletextpad=0.3, columnspacing=0.6,
                bbox_to_anchor=(0.5, -0.02))
     fig.tight_layout(rect=(0, 0.18, 1, 1))
-    out = Path("../figures/loss_plateau_compact.pdf")
+    out = Path(f"../figures/loss_plateau_compact{suffix}.pdf")
     fig.savefig(out)
     print(f"  {out}")
     plt.close(fig)

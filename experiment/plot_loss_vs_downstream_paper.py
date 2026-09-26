@@ -244,6 +244,13 @@ def _legends(fig, ax0, ref):
 
 def main():
     rows, dropped_tr1, truncated, off_paper = load()
+    # --no-1b drops the ~1B size and writes *_no1b.pdf. The 1B runs trained with
+    # 8-GPU DDP, where every rank read nearly the same rows (~263 distinct of
+    # 2048 per step), so they are not the same training regime as 8-256/8-512.
+    no1b = "--no-1b" in sys.argv
+    suffix = "_no1b" if no1b else ""
+    if no1b:
+        rows = [r for r in rows if r["size"] != "~1B"]
     if not rows:
         print("  no data"); return
 
@@ -303,7 +310,7 @@ def main():
     _legends(fig, axes[0][0], ref)
 
     fig.tight_layout(pad=0.3)
-    out = FIGS / "loss_vs_downstream_paper.pdf"
+    out = FIGS / f"loss_vs_downstream_paper{suffix}.pdf"
     fig.savefig(out)
     fig.savefig(out.with_suffix(".png"), dpi=200)
     plt.close(fig)
@@ -317,7 +324,7 @@ def main():
     ax.set_xlabel("compartment-0 val loss (nats)", fontsize=LABEL_FS)
     _legends(fig, ax, ref)
     fig.tight_layout(pad=0.3)
-    out = FIGS / "loss_vs_downstream_aggregate.pdf"
+    out = FIGS / f"loss_vs_downstream_aggregate{suffix}.pdf"
     fig.savefig(out)
     fig.savefig(out.with_suffix(".png"), dpi=200)
     plt.close(fig)
