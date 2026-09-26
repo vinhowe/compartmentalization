@@ -61,10 +61,19 @@ def collect_val_at_tr075():
 
 
 def collect_cossim_at_tr075():
-    """Return dict {c: [(wd, cossim), ...]} for absolute-mode tr=0.75 cells."""
+    """Return dict {c: [(wd, cossim), ...]} for absolute-mode tr=0.75 cells.
+
+    Same 1M filter as collect_val_at_tr075: keep a run only if its formal eval
+    reaches step 1M. cossim_sweep.json was computed from each run's rolling
+    checkpoint, so without this a run that stopped early (c=8 at wd=0.01 stops
+    at 500k, wd=0.1 at 400k) is plotted at whatever step it had reached."""
     out = defaultdict(dict)
+    m = json.loads(Path("val_metrics.json").read_text())
     cka_data = json.loads(Path("cossim_sweep.json").read_text())
     for k, v in cka_data.items():
+        vm = m.get(k)
+        if not vm or not vm.get("checkpoints") or vm["checkpoints"][-1] < 1_000_000:
+            continue
         if v["mode"] != "absolute":
             continue
         if abs(v["tr_raw"] - TR_TARGET) > 1e-6:
