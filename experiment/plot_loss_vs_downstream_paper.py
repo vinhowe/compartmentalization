@@ -152,6 +152,96 @@ def load():
     return rows, sorted(dropped_tr1), sorted(truncated), sorted(off_paper)
 
 
+def _draw_panel(ax, key, ylab, title, scatter, ref, lo, hi, pad):
+    for s in SIZE_ORDER:
+        pts = [r for r in scatter if r["size"] == s]
+        if pts:
+            ax.scatter([r["loss"] for r in pts], [r["per"][key] for r in pts],
+                       s=4.5, color=SIZE_COLOR[s], zorder=3, alpha=0.45,
+                       edgecolor="none")
+    # c=1 as a distinct marker rather than a line. Connecting its
+    # checkpoints implied a fitted curve through the cloud and, at 661
+    # scattered points, either buried the data or got buried by it. Same
+    # encoding as everything else -- one dot per checkpoint -- but a
+    # diamond, fully opaque, outlined, and on top, so the baseline is
+    # findable without being a different kind of object.
+    for s in SIZE_ORDER:
+        if s not in ref:
+            continue
+        ax.scatter([r["loss"] for r in ref[s]], [r["per"][key] for r in ref[s]],
+                   s=10, color=SIZE_COLOR[s], zorder=6, marker="D",
+                   edgecolor="white", linewidth=0.75)
+    # Chance floor, drawn but deliberately NOT in the legend: it is
+    # explained in the caption instead, where there is room to say that
+    # likelihood-argmax scoring is a deterministic choice rather than a
+    # uniform guess, and so can land below chance. A bare "chance" key
+    # invites the reader to treat sub-chance points as an error.
+    ax.axhline(CHANCE_OF[key], color="0.55", lw=0.6, ls=(0, (2.5, 2)),
+               zorder=2)
+    ax.set_title(title, fontsize=TITLE_FS, pad=2.5)
+    ax.set_ylabel(ylab, fontsize=LABEL_FS)
+    ax.grid(alpha=0.3)
+    ax.tick_params(labelsize=TICK_FS)
+    # Integer ticks everywhere. Left to itself matplotlib picks 2.5-unit
+    # steps on ARC-e and PIQA and whole units elsewhere, so those two panels
+    # get an extra ".5" digit of tick-label width and shove their y-label
+    # into the panel on their left. Same tick width in every panel also
+    # keeps the six axes boxes the same size.
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+    # Limits come from the SCATTER, not the reference lines: the c=1
+    # trajectories start above 10 nats and would otherwise compress every
+    # finished model into the right-hand tenth of the panel.
+    # Log loss axis: with every checkpoint plotted the range is 3.1-11.5
+    # nats, and on a linear axis the converged models -- the comparison the
+    # figure exists to make -- are crushed into the right fifth while the
+    # left half is an empty chance plateau. Log gives the low-loss end room
+    # without discarding the plateau. Ticks stay real loss values.
+    if X_SCALE == "log":
+        ax.set_xscale("log")
+        ax.xaxis.set_major_formatter(ScalarFormatter())
+        ax.xaxis.set_minor_formatter(NullFormatter())
+        ax.set_xticks([3, 4, 6, 8, 11])
+    ax.set_xlim(hi + pad, lo - pad)
+
+
+
+def _legends(fig, ax0, ref):
+    LEG_X, LEG_TOP, LEG_GAP = 0.035, 0.968, 0.035
+
+    # Two legends on one Axes, each with a native title. This is matplotlib's
+    # documented way to show two independent encodings ("Multiple legends on the
+    # same Axes"): build each with proxy artists, and re-add the first with
+    # add_artist because a second legend() call would otherwise replace it. The
+    # title= parameter is the supported group heading -- an earlier revision
+    # faked headings and a divider with invisible-handle text rows and a
+    # box-drawing rule, which is not a real divider and read as one.
+    common = dict(frameon=False, fontsize=LEG_FS, title_fontsize=LEG_FS,
+                  handletextpad=0.4, borderpad=0.0, labelspacing=0.25,
+                  handlelength=1.5, borderaxespad=0.0, alignment="left")
+    # Marker handles, not line swatches: nothing in the figure is drawn as a
+    # line any more, so a line swatch would advertise an encoding that is gone.
+    size_h = [plt.Line2D([], [], color=SIZE_COLOR[s], lw=0, marker="o",
+                         markersize=3.0, markeredgecolor="none",
+                         label=SIZE_LABEL[s]) for s in SIZE_ORDER if s in ref]
+    shape_h = [
+        plt.Line2D([], [], color="0.35", lw=0, marker="D", markersize=2.7,
+                   markeredgecolor="white", markeredgewidth=0.75,
+                   label="$c=1$, across training"),
+        plt.Line2D([], [], color="0.35", lw=0, marker="o", markersize=2.6,
+                   markeredgecolor="none", alpha=0.6,
+                   label="$c\\geq2$, all checkpoints"),
+    ]
+    leg1 = ax0.legend(handles=size_h, title="model size", loc="upper left",
+                      bbox_to_anchor=(LEG_X, LEG_TOP), **common)
+    ax0.add_artist(leg1)
+    # Needs a renderer before the extent is known.
+    fig.canvas.draw()
+    bb = leg1.get_window_extent().transformed(ax0.transAxes.inverted())
+    ax0.legend(handles=shape_h, title="series", loc="upper left",
+               bbox_to_anchor=(LEG_X, bb.y0 - LEG_GAP), **common)
+
+
+
 def main():
     rows, dropped_tr1, truncated, off_paper = load()
     if not rows:
@@ -198,56 +288,7 @@ def main():
     pad = 0.04 * (hi - lo)
 
     for ax, (key, ylab, title) in zip(axes.ravel(), panels):
-        for s in SIZE_ORDER:
-            pts = [r for r in scatter if r["size"] == s]
-            if pts:
-                # Above the reference lines (zorder), with a thin white ring so a
-                # point sitting exactly on its own size's curve -- which is the
-                # expected outcome, and the whole finding -- still reads as a
-                # point rather than dissolving into the line.
-                ax.scatter([r["loss"] for r in pts], [r["per"][key] for r in pts],
-                           s=4.5, color=SIZE_COLOR[s], zorder=3, alpha=0.45,
-                           edgecolor="none")
-        for s in SIZE_ORDER:
-            if s not in ref:
-                continue
-            # Reference curves sit BEHIND the data. They are context for reading
-            # the scatter, not the subject: drawn on top at 1.9pt plus a 3.2pt
-            # white halo they occluded most of the points they were meant to
-            # explain. Thinner, and underneath.
-            ax.plot([r["loss"] for r in ref[s]], [r["per"][key] for r in ref[s]],
-                    color=SIZE_COLOR[s], lw=1.3, zorder=6, solid_capstyle="round",
-                    path_effects=[pe.Stroke(linewidth=2.5, foreground="white"),
-                                  pe.Normal()])
-        # Chance floor. With intermediate checkpoints in view most of the mass
-        # sits on it, so without the line the flat left-hand band reads as a
-        # weak trend rather than as "not yet above chance".
-        ax.axhline(CHANCE_OF[key], color="0.55", lw=0.6, ls=(0, (2.5, 2)),
-                   zorder=2)
-        ax.set_title(title, fontsize=TITLE_FS, pad=2.5)
-        ax.set_ylabel(ylab, fontsize=LABEL_FS)
-        ax.grid(alpha=0.3)
-        ax.tick_params(labelsize=TICK_FS)
-        # Integer ticks everywhere. Left to itself matplotlib picks 2.5-unit
-        # steps on ARC-e and PIQA and whole units elsewhere, so those two panels
-        # get an extra ".5" digit of tick-label width and shove their y-label
-        # into the panel on their left. Same tick width in every panel also
-        # keeps the six axes boxes the same size.
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
-        # Limits come from the SCATTER, not the reference lines: the c=1
-        # trajectories start above 10 nats and would otherwise compress every
-        # finished model into the right-hand tenth of the panel.
-        # Log loss axis: with every checkpoint plotted the range is 3.1-11.5
-        # nats, and on a linear axis the converged models -- the comparison the
-        # figure exists to make -- are crushed into the right fifth while the
-        # left half is an empty chance plateau. Log gives the low-loss end room
-        # without discarding the plateau. Ticks stay real loss values.
-        if X_SCALE == "log":
-            ax.set_xscale("log")
-            ax.xaxis.set_major_formatter(ScalarFormatter())
-            ax.xaxis.set_minor_formatter(NullFormatter())
-            ax.set_xticks([3, 4, 6, 8, 11])
-        ax.set_xlim(hi + pad, lo - pad)
+        _draw_panel(ax, key, ylab, title, scatter, ref, lo, hi, pad)
 
     for ax in axes[1]:
         ax.set_xlabel("compartment-0 val loss (nats)", fontsize=LABEL_FS)
@@ -259,40 +300,24 @@ def main():
     # another, and a literal offset silently breaks whenever the font size or
     # the number of size entries changes (it did, twice -- once overlapping the
     # data, once colliding with the block above).
-    LEG_X, LEG_TOP, LEG_GAP = 0.035, 0.968, 0.035
-
-    # Two legends on one Axes, each with a native title. This is matplotlib's
-    # documented way to show two independent encodings ("Multiple legends on the
-    # same Axes"): build each with proxy artists, and re-add the first with
-    # add_artist because a second legend() call would otherwise replace it. The
-    # title= parameter is the supported group heading -- an earlier revision
-    # faked headings and a divider with invisible-handle text rows and a
-    # box-drawing rule, which is not a real divider and read as one.
-    common = dict(frameon=False, fontsize=LEG_FS, title_fontsize=LEG_FS,
-                  handletextpad=0.4, borderpad=0.0, labelspacing=0.25,
-                  handlelength=1.5, borderaxespad=0.0, alignment="left")
-    size_h = [plt.Line2D([], [], color=SIZE_COLOR[s], lw=1.6,
-                         label=SIZE_LABEL[s]) for s in SIZE_ORDER if s in ref]
-    shape_h = [
-        plt.Line2D([], [], color="0.35", lw=1.6, label="$c=1$, across training"),
-        plt.Line2D([], [], color="0.35", lw=0, marker="o", markersize=2.6,
-                   markeredgecolor="none", alpha=0.6,
-                   label="$c\\geq2$, all checkpoints"),
-        plt.Line2D([], [], color="0.55", lw=0.6, ls=(0, (2.5, 2)),
-                   label="chance"),
-    ]
-    ax0 = axes[0][0]
-    leg1 = ax0.legend(handles=size_h, title="model size", loc="upper left",
-                      bbox_to_anchor=(LEG_X, LEG_TOP), **common)
-    ax0.add_artist(leg1)
-    # Needs a renderer before the extent is known.
-    fig.canvas.draw()
-    bb = leg1.get_window_extent().transformed(ax0.transAxes.inverted())
-    ax0.legend(handles=shape_h, title="series", loc="upper left",
-               bbox_to_anchor=(LEG_X, bb.y0 - LEG_GAP), **common)
+    _legends(fig, axes[0][0], ref)
 
     fig.tight_layout(pad=0.3)
     out = FIGS / "loss_vs_downstream_paper.pdf"
+    fig.savefig(out)
+    fig.savefig(out.with_suffix(".png"), dpi=200)
+    plt.close(fig)
+    print(f"  wrote {out.name}")
+
+    # Body version: the aggregate panel alone. The 2x3 grid stays in the
+    # appendix; the body needs only the claim it supports, one panel wide.
+    fig, ax = plt.subplots(1, 1, figsize=(2.7, 2.3))
+    _draw_panel(ax, *panels[0], scatter, ref, lo, hi, pad)
+    ax.set_title("")
+    ax.set_xlabel("compartment-0 val loss (nats)", fontsize=LABEL_FS)
+    _legends(fig, ax, ref)
+    fig.tight_layout(pad=0.3)
+    out = FIGS / "loss_vs_downstream_aggregate.pdf"
     fig.savefig(out)
     fig.savefig(out.with_suffix(".png"), dpi=200)
     plt.close(fig)
