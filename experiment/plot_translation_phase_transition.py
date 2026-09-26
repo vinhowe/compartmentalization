@@ -22,7 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from plot_baseline_val_curves import setup_paper_style, C_COLOR
+from plot_baseline_val_curves import setup_paper_style, C_COLOR, FOURUP_FIGSIZE, FOURUP_ADJUST
 from _run_paths import C1_BASELINE_8_256
 
 
@@ -182,6 +182,23 @@ def main():
               columnspacing=0.6, borderpad=0.2)
     fig.tight_layout(pad=0.3)
     out = Path("../figures/tr_phase_no_wd_val_compact.pdf")
+    fig.savefig(out); print(f"  {out}"); plt.close(fig)
+
+    # Four-across variant (see FOURUP_FIGSIZE): same fonts, narrower. Four
+    # legend columns no longer fit and a third row would sit on the c=2 line,
+    # so the c=1 entry is dropped (the caption already names the dotted line)
+    # and the six c-entries take two rows of three.
+    fig, ax = plt.subplots(figsize=FOURUP_FIGSIZE)
+    panel_A(ax, cells, c1_floor)
+    handles, labels = ax.get_legend_handles_labels()
+    keep = [(h, l) for h, l in zip(handles, labels) if l != "c=1"]
+    ax.legend([h for h, _ in keep], [l for _, l in keep],
+              loc="lower left", bbox_to_anchor=(0, 0.02),
+              frameon=False, fontsize=7.3,
+              handlelength=0.8, handletextpad=0.25, ncol=3,
+              columnspacing=0.4, borderpad=0.1)
+    fig.subplots_adjust(**FOURUP_ADJUST)
+    out = Path("../figures/tr_phase_no_wd_val_4up.pdf")
     fig.savefig(out); print(f"  {out}"); plt.close(fig)
 
     # §4.2 wd: 1x3 strip for c=5, 6, 8 (val), shared y. Per-panel c-label as

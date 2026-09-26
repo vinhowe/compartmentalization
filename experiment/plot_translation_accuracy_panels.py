@@ -48,7 +48,7 @@ import matplotlib.pyplot as plt
 HERE = Path(__file__).resolve().parent
 FIGS = HERE.parent / "figures"
 sys.path.insert(0, str(HERE))
-from plot_baseline_val_curves import setup_paper_style, C_COLOR  # noqa: E402
+from plot_baseline_val_curves import setup_paper_style, C_COLOR, FOURUP_FIGSIZE, FOURUP_ADJUST  # noqa: E402
 
 CONTROL_GREY = "#999999"
 
@@ -63,7 +63,7 @@ def series(fname):
     return [r["step"] for r in recs], [100.0 * r["aggregate"]["exact_match"] for r in recs]
 
 
-def panel(specs, figsize, out, *, legend_kw, ymax, pad):
+def panel(specs, figsize, out, *, legend_kw, ymax, pad, adjust=None):
     setup_paper_style()
     fig, ax = plt.subplots(figsize=figsize)
     drew = 0
@@ -111,12 +111,31 @@ def panel(specs, figsize, out, *, legend_kw, ymax, pad):
     # sits inside that canvas. Fig 3's other panels use pad=0.3 and the 1B
     # figure's other panel uses matplotlib's default, so a single value here
     # would visibly misalign one figure or the other.
-    fig.tight_layout(**({} if pad is None else {"pad": pad}))
+    if adjust is not None:
+        fig.subplots_adjust(**adjust)
+    else:
+        fig.tight_layout(**({} if pad is None else {"pad": pad}))
     fig.savefig(FIGS / out)
     # PNG alongside the PDF purely for review/preview; the PDF is the artifact.
     fig.savefig((FIGS / out).with_suffix(".png"), dpi=200)
     plt.close(fig)
     print(f"  wrote {out}  ({drew}/{len(specs)} series)")
+
+
+def placeholder_4up(out):
+    """Empty panel with the four-across geometry, so Fig. 4 can be laid out
+    before its fourth panel exists."""
+    setup_paper_style()
+    fig, ax = plt.subplots(figsize=FOURUP_FIGSIZE)
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.grid(False)
+    ax.set_xlabel(" "); ax.set_ylabel(" ")
+    ax.text(0.5, 0.5, "panel (d)", transform=ax.transAxes,
+            ha="center", va="center", color="0.6")
+    fig.subplots_adjust(**FOURUP_ADJUST)
+    fig.savefig(FIGS / out)
+    plt.close(fig)
+    print(f"  wrote {out}")
 
 
 def main():
@@ -129,10 +148,19 @@ def main():
         return [f"transacc_reseed_8-256-n{c}-tr05abs-s{s}.json" for s in (65, 66)]
     fig3b = [(f"transacc_8256_n{c}-tr05.json", f"c={c}", C_COLOR[c], "-", "o",
               _seed_files(c)) for c in (2, 3, 4, 5, 6, 8)]
+    # Legend at 7.5pt like its neighbours (panel c uses the 7.5 default, panel
+    # a 7.3); it was 6.5 and read visibly smaller on the page.
+    fig3b_legend = dict(loc="upper left", frameon=False, fontsize=7.5,
+                        handlelength=1.0, handletextpad=0.3, ncol=2,
+                        columnspacing=0.8, borderpad=0.2)
     panel(fig3b, (2.4, 2.0), "transacc_8_256_em_compact.pdf", ymax=103, pad=0.3,
-          legend_kw=dict(loc="upper left", frameon=False, fontsize=6.5,
-                         handlelength=1.0, handletextpad=0.3, ncol=2,
-                         columnspacing=0.8, borderpad=0.2))
+          legend_kw=fig3b_legend)
+    # Four-across variant (see FOURUP_FIGSIZE): same fonts, narrower.
+    panel(fig3b, FOURUP_FIGSIZE, "transacc_8_256_em_4up.pdf", ymax=103, pad=None,
+          adjust=FOURUP_ADJUST,
+          # one column: at this width a second column sits on the rising curves
+          legend_kw=dict(fig3b_legend, ncol=1, labelspacing=0.2))
+    placeholder_4up("fig4d_placeholder_4up.pdf")
 
     # ---- Fig 4b replacement: 1B, c=8 across tr, + c=2 contrast --------------
     cmap = plt.get_cmap("viridis")

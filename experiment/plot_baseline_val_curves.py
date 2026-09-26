@@ -30,6 +30,15 @@ from _run_paths import (
 )
 
 
+# Four-across layout (Fig. 4 with a fourth panel). The three-across panels are
+# 2.4in wide in a 0.32\textwidth subfigure, i.e. drawn at 0.733 scale on the
+# page. A 0.245\textwidth subfigure at the same scale is 1.84in wide, so these
+# panels keep the same height and the same on-page font size, only narrower.
+# Fixed margins (not tight_layout) so all four axes boxes are identical.
+FOURUP_FIGSIZE = (1.84, 2.0)
+FOURUP_ADJUST = dict(left=0.30, right=0.96, bottom=0.22, top=0.97)
+
+
 def setup_paper_style():
     rcParams.update({
         "pdf.fonttype": 42, "ps.fonttype": 42,

@@ -17,7 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from plot_baseline_val_curves import setup_paper_style, C_COLOR
+from plot_baseline_val_curves import setup_paper_style, C_COLOR, FOURUP_FIGSIZE, FOURUP_ADJUST
 
 
 def load():
@@ -119,6 +119,19 @@ def main():
               columnspacing=0.6, borderpad=0.2)
     fig.tight_layout(pad=0.3)
     out = Path("../figures/tr_phase_no_wd_cossim_compact.pdf")
+    fig.savefig(out); print(f"  {out}"); plt.close(fig)
+
+    # Four-across variant (see FOURUP_FIGSIZE): same fonts, narrower; one
+    # legend column, since a second one covers the rising c=6/c=8 lines.
+    fig, ax = plt.subplots(figsize=FOURUP_FIGSIZE)
+    panel_A(ax, cells)
+    ax.legend(loc="upper left",
+              frameon=True, facecolor="white", edgecolor="none",
+              framealpha=0.9,
+              handlelength=1.0, handletextpad=0.3, ncol=1,
+              borderpad=0.2, labelspacing=0.2)
+    fig.subplots_adjust(**FOURUP_ADJUST)
+    out = Path("../figures/tr_phase_no_wd_cossim_4up.pdf")
     fig.savefig(out); print(f"  {out}"); plt.close(fig)
 
     # §4.2 wd: 1x3 strip for c=5, 6, 8 (cossim), shared y; in-axis c-label.
