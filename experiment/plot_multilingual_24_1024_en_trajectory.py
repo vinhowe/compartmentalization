@@ -1,4 +1,4 @@
-"""EN val loss over training at 24-1024 (620M), single-panel for appendix.
+"""EN val loss over training at 24-1024 (613M), single-panel for appendix.
 
 Shows the full EN-side trajectory for shared / compartmented / en-only at the
 largest multilingual scale we trained, complementing body Fig.~\\ref{fig:multilingual-scaling}

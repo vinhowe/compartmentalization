@@ -1,6 +1,6 @@
 """Multilingual scaling figure: final per-language val loss vs scale.
 
-4 scales: 12-256 (~87M params), 24-512 (~230M), 24-768 (~370M), 24-1024 (~620M).
+4 scales: 12-256 (~87M params), 24-512 (~231M), 24-768 (~403M), 24-1024 (~613M).
 3 conditions: shared, compartmented, en-only.
 
 Two panels (EN, ZH), x = scale (with M-params labels), y = final val loss.
@@ -23,11 +23,14 @@ import matplotlib.pyplot as plt
 from plot_baseline_val_curves import setup_paper_style
 
 
+# Total parameters of the shared-tokenizer model: untied embedding and LM head
+# (2 * 151,936 * d) plus trunk (12 * n_layer * d^2). The compartmented models
+# have twice the embedding rows; these labels are the shared ones.
 SCALES = [
     ("12-256", 87.2,    "multilingual_val_curves_no_infonce.json"),
-    ("24-512", 230.0,   "multilingual_24_512_per_lang.json"),
-    ("24-768", 370.0,   "multilingual_24_768_per_lang.json"),
-    ("24-1024", 620.0,  "multilingual_24_1024_per_lang.json"),
+    ("24-512", 231.1,   "multilingual_24_512_per_lang.json"),
+    ("24-768", 403.3,   "multilingual_24_768_per_lang.json"),
+    ("24-1024", 613.2,  "multilingual_24_1024_per_lang.json"),
 ]
 
 CONDITIONS = [
