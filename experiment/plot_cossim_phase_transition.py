@@ -21,7 +21,14 @@ from plot_baseline_val_curves import setup_paper_style, C_COLOR
 
 
 def load():
-    return list(json.loads(Path("cossim_sweep.json").read_text()).values())
+    """Main sweep plus the reseed cells, which supply seeds 65/66 of the same
+    (c, tr) grid. Kept in a separate file so the default sweep's output is
+    untouched; merged here so each point becomes a 3-seed estimate."""
+    cells = list(json.loads(Path("cossim_sweep.json").read_text()).values())
+    extra = Path("cossim_sweep_reseed.json")
+    if extra.exists():
+        cells += list(json.loads(extra.read_text()).values())
+    return cells
 
 
 def panel_A(ax, cells):
@@ -32,8 +39,16 @@ def panel_A(ax, cells):
         by_c[r["c"]].setdefault(r["tr_eff"], []).append(r["mean_off_diag_cossim"])
     for c in sorted(by_c):
         trs = sorted(by_c[c])
-        vals = [max(by_c[c][t]) for t in trs]
-        ax.plot(trs, vals, color=C_COLOR.get(c, "k"), marker="o",
+        # Mean with a min-max band. NOT max: with one seed max was that seed,
+        # but across three it is best-of-three, which would inflate the
+        # apparent alignment for a reason that is not physical -- the mirror of
+        # the min() problem in the val-loss panel.
+        vals = [float(np.mean(by_c[c][t])) for t in trs]
+        lo = [float(np.min(by_c[c][t])) for t in trs]
+        hi = [float(np.max(by_c[c][t])) for t in trs]
+        col = C_COLOR.get(c, "k")
+        ax.fill_between(trs, lo, hi, color=col, alpha=0.18, linewidth=0)
+        ax.plot(trs, vals, color=col, marker="o",
                 markersize=4, linewidth=1.4, label=f"c={c}")
     ax.set_xlabel("translation ratio")
     ax.set_ylabel("cosine sim. (layer 4)")

@@ -33,7 +33,10 @@ def collect_cells():
     """Return list[dict] with one entry per (run, last-step val). Effective tr."""
     m = json.loads(Path("val_metrics.json").read_text())
     out = []
-    for g in ["bpe16384-rope-wd-n2", "bpe16384-rope-wd-n3-n8", "bpe16384-rope-8-256"]:
+    # 8-256-reseed carries seeds 65/66 of the same cells; including it is what
+    # turns each (c, tr) point into a 3-seed estimate instead of a single run.
+    for g in ["bpe16384-rope-wd-n2", "bpe16384-rope-wd-n3-n8", "bpe16384-rope-8-256",
+              "8-256-reseed"]:
         for d in sorted((Path("..") / "out" / "translation-compression" / g).iterdir()):
             cf = d / "meta" / "config.json"
             if not cf.exists():
@@ -69,8 +72,19 @@ def panel_A(ax, cells, c1_floor):
         by_c[r["c"]].setdefault(r["tr_eff"], []).append(r["val"])
     for c in sorted(by_c):
         trs = sorted(by_c[c])
-        vals = [min(by_c[c][t]) for t in trs]  # min across seeds (best)
-        ax.plot(trs, vals, color=C_COLOR.get(c, "k"), marker="o",
+        # Mean across seeds, with a min-max band. NOT min: with a single seed
+        # min was that seed, but with three it becomes best-of-three, which
+        # would drop c=6 tr=0.75 by 0.23 nats purely from having added seeds --
+        # deepening the apparent transition for a reason that is not physical.
+        # Band is min-max rather than +/-1 SD because four high-c high-tr cells
+        # are bimodal (two seeds together, one on another branch), and an SD
+        # summarises neither branch.
+        vals = [float(np.mean(by_c[c][t])) for t in trs]
+        lo = [float(np.min(by_c[c][t])) for t in trs]
+        hi = [float(np.max(by_c[c][t])) for t in trs]
+        col = C_COLOR.get(c, "k")
+        ax.fill_between(trs, lo, hi, color=col, alpha=0.18, linewidth=0)
+        ax.plot(trs, vals, color=col, marker="o",
                 markersize=4, linewidth=1.4, label=f"c={c}")
     ax.axhline(c1_floor, color="black", linewidth=0.6, alpha=0.5,
                linestyle=":", label="c=1")

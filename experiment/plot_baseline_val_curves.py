@@ -25,7 +25,7 @@ import matplotlib.pyplot as _plt
 
 from _run_paths import (
     C1_BASELINE_BY_SCALE, RUNS_SMALL_SCALE_TR01, RUNS_N3_ROPE,
-    NO_INFONCE_8_256_BY_C, RUN_8_256_C1_EXTRA, RUNS_8_512_LEGACY_BY_C,
+    NO_INFONCE_8_256_BY_C, RUN_8_256_C3, RUNS_8_512_LEGACY_BY_C,
     RUN_1B_C1_BASELINE, RUN_1B_C2_NOTRANS, RUN_1B_C8_NOTRANS,
 )
 
@@ -63,7 +63,7 @@ PANELS = [
     (256, [
         (1, C1_BASELINE_BY_SCALE[256]),
         (2, NO_INFONCE_8_256_BY_C[2]),
-        (3, RUN_8_256_C1_EXTRA),
+        (3, RUN_8_256_C3),
         (4, NO_INFONCE_8_256_BY_C[4]),
         (5, NO_INFONCE_8_256_BY_C[5]),
         (6, NO_INFONCE_8_256_BY_C[6]),
