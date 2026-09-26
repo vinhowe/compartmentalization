@@ -19,7 +19,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from plot_baseline_val_curves import setup_paper_style, C_COLOR
+from plot_baseline_val_curves import (setup_paper_style, C_COLOR, THREEUP_FIGSIZE,
+                                      THREEUP_ADJUST, placeholder_panel)
 from _run_paths import C1_BASELINE_8_256
 
 
@@ -123,6 +124,29 @@ def main():
     fig.tight_layout()
     out = Path("../figures/tr_wd_tr075_cossim.pdf")
     fig.savefig(out); print(f"  {out}"); plt.close(fig)
+
+    # Three-across variants (see THREEUP_FIGSIZE), for a third panel still to
+    # be made; same legends, fixed margins so the three axes align.
+    fig, ax = plt.subplots(figsize=THREEUP_FIGSIZE)
+    panel(ax, val_by_c, "val loss (nats)", hline=c1_floor)
+    ax.legend(loc="lower left", frameon=False,
+              handlelength=1.0, handletextpad=0.3, ncol=2,
+              columnspacing=0.6, borderpad=0.2)
+    fig.subplots_adjust(**THREEUP_ADJUST)
+    out = Path("../figures/tr_wd_tr075_val_3up.pdf")
+    fig.savefig(out); print(f"  {out}"); plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=THREEUP_FIGSIZE)
+    panel(ax, cossim_by_c, "cosine sim. (layer 4)", ylim=(-0.05, 1.05))
+    ax.axhline(0.0, color="black", linewidth=0.5, alpha=0.4, linestyle=":")
+    ax.legend(loc="center left", bbox_to_anchor=(0.02, 0.6),
+              frameon=False, handlelength=1.0, handletextpad=0.3)
+    fig.subplots_adjust(**THREEUP_ADJUST)
+    out = Path("../figures/tr_wd_tr075_cossim_3up.pdf")
+    fig.savefig(out); print(f"  {out}"); plt.close(fig)
+
+    placeholder_panel(Path("../figures/fig_wd_placeholder_3up.pdf"),
+                      THREEUP_FIGSIZE, THREEUP_ADJUST)
 
 
 if __name__ == "__main__":

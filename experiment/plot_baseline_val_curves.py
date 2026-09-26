@@ -46,6 +46,27 @@ FOURUP_ADJUST = dict(left=0.30, right=0.96, bottom=0.22, top=0.97)
 GRID2_FIGSIZE = (3.3, 1.75)
 GRID2_ADJUST = dict(left=0.16, right=0.97, bottom=0.25, top=0.97)
 
+# Three-across layout with fixed margins (the geometry of Fig. 4's current
+# 0.32\textwidth panels, 2.4x2.0in), for figures that gain a third panel.
+THREEUP_FIGSIZE = (2.4, 2.0)
+THREEUP_ADJUST = dict(left=0.24, right=0.96, bottom=0.22, top=0.96)
+
+
+def placeholder_panel(out, figsize, adjust):
+    """Empty panel with a layout's geometry, so a figure can be laid out
+    before one of its panels exists."""
+    setup_paper_style()
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.grid(False)
+    ax.set_xlabel(" "); ax.set_ylabel(" ")
+    ax.text(0.5, 0.5, "placeholder", transform=ax.transAxes,
+            ha="center", va="center", color="0.6")
+    fig.subplots_adjust(**adjust)
+    fig.savefig(out)
+    plt.close(fig)
+    print(f"  wrote {out}")
+
 
 def setup_paper_style():
     rcParams.update({
