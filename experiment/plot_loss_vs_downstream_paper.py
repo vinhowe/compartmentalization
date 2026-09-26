@@ -57,6 +57,7 @@ sys.path.insert(0, str(HERE))
 from plot_baseline_val_curves import setup_paper_style  # noqa: E402
 
 TASKS = ["hellaswag", "arc_easy", "piqa", "sciq", "lambada"]
+FIT_TASKS = ["arc_easy", "piqa", "sciq"]
 CHANCE = {"hellaswag": 25.0, "arc_easy": 25.0, "piqa": 50.0, "sciq": 25.0,
           "lambada": 0.0}
 NICE = {"hellaswag": "HellaSwag", "arc_easy": "ARC-e", "piqa": "PIQA",
@@ -251,6 +252,15 @@ def main():
     suffix = "_no1b" if no1b else ""
     if no1b:
         rows = [r for r in rows if r["size"] != "~1B"]
+    # --fit-only keeps the tasks whose scored sequences mostly fit the 64-token
+    # training context (SciQ 99.9%, ARC-e 92.3%, PIQA 86.1%) and drops HellaSwag
+    # (30.6%) and LAMBADA (2.9%), which are scored mostly on left-truncated text.
+    # The aggregate margin is recomputed over the kept tasks.
+    tasks = FIT_TASKS if "--fit-only" in sys.argv else TASKS
+    if tasks is FIT_TASKS:
+        suffix += "_3task"
+        for r in rows:
+            r["per"]["_margin"] = float(np.mean([r["per"][t] - CHANCE[t] for t in tasks]))
     if not rows:
         print("  no data"); return
 
@@ -285,10 +295,12 @@ def main():
     setup_paper_style()
     panels = [("_margin", "margin over chance (pp)", "Aggregate")] + \
              [(t, "accuracy (\\%)" if matplotlib.rcParams.get("text.usetex")
-               else "accuracy (%)", NICE[t]) for t in TASKS]
+               else "accuracy (%)", NICE[t]) for t in tasks]
 
     # 5.5in = NeurIPS \textwidth: included at scale 1.0, so type is unscaled.
-    fig, axes = plt.subplots(2, 3, figsize=(5.5, 3.7), sharex=True)
+    # Aggregate + 5 tasks fills 2x3; aggregate + 3 tasks fills 2x2.
+    ncol = 3 if len(panels) == 6 else 2
+    fig, axes = plt.subplots(2, ncol, figsize=(5.5, 3.7), sharex=True)
 
     lo = min(r["loss"] for r in scatter)
     hi = max(r["loss"] for r in scatter)
