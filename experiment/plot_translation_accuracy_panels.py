@@ -162,9 +162,10 @@ def main():
           # one column: at this width a second column sits on the rising curves
           legend_kw=dict(fig3b_legend, ncol=1, labelspacing=0.2))
     placeholder_4up("fig4d_placeholder_4up.pdf")
-    # 2x2 variant (see GRID2_FIGSIZE): room for the compact two-column legend.
+    # 2x2 variant (see GRID2_FIGSIZE): legend in two rows of three, since the
+    # flattened panel has little height to spare.
     panel(fig3b, GRID2_FIGSIZE, "transacc_8_256_em_2x2.pdf", ymax=103, pad=None,
-          adjust=GRID2_ADJUST, legend_kw=fig3b_legend)
+          adjust=GRID2_ADJUST, legend_kw=dict(fig3b_legend, ncol=3))
     placeholder_4up("fig4d_placeholder_2x2.pdf", GRID2_FIGSIZE, GRID2_ADJUST)
 
     # ---- Fig 4b replacement: 1B, c=8 across tr, + c=2 contrast --------------

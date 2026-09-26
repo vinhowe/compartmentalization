@@ -135,13 +135,14 @@ def main():
     out = Path("../figures/tr_phase_no_wd_cossim_4up.pdf")
     fig.savefig(out); print(f"  {out}"); plt.close(fig)
 
-    # 2x2 variant (see GRID2_FIGSIZE): same legend as the compact panel.
+    # 2x2 variant (see GRID2_FIGSIZE): legend in two rows of three, since the
+    # flattened panel has little height to spare.
     fig, ax = plt.subplots(figsize=GRID2_FIGSIZE)
     panel_A(ax, cells)
     ax.legend(loc="upper left",
               frameon=True, facecolor="white", edgecolor="none",
               framealpha=0.9,
-              handlelength=1.0, handletextpad=0.3, ncol=2,
+              handlelength=1.0, handletextpad=0.3, ncol=3,
               columnspacing=0.6, borderpad=0.2)
     fig.subplots_adjust(**GRID2_ADJUST)
     out = Path("../figures/tr_phase_no_wd_cossim_2x2.pdf")
