@@ -48,7 +48,8 @@ import matplotlib.pyplot as plt
 HERE = Path(__file__).resolve().parent
 FIGS = HERE.parent / "figures"
 sys.path.insert(0, str(HERE))
-from plot_baseline_val_curves import setup_paper_style, C_COLOR, FOURUP_FIGSIZE, FOURUP_ADJUST  # noqa: E402
+from plot_baseline_val_curves import (setup_paper_style, C_COLOR, FOURUP_FIGSIZE,  # noqa: E402
+                                      FOURUP_ADJUST, GRID2_FIGSIZE, GRID2_ADJUST)
 
 CONTROL_GREY = "#999999"
 
@@ -122,17 +123,17 @@ def panel(specs, figsize, out, *, legend_kw, ymax, pad, adjust=None):
     print(f"  wrote {out}  ({drew}/{len(specs)} series)")
 
 
-def placeholder_4up(out):
-    """Empty panel with the four-across geometry, so Fig. 4 can be laid out
-    before its fourth panel exists."""
+def placeholder_4up(out, figsize=FOURUP_FIGSIZE, adjust=FOURUP_ADJUST):
+    """Empty panel with the four-across (or 2x2) geometry, so Fig. 4 can be
+    laid out before its fourth panel exists."""
     setup_paper_style()
-    fig, ax = plt.subplots(figsize=FOURUP_FIGSIZE)
+    fig, ax = plt.subplots(figsize=figsize)
     ax.set_xticks([]); ax.set_yticks([])
     ax.grid(False)
     ax.set_xlabel(" "); ax.set_ylabel(" ")
     ax.text(0.5, 0.5, "panel (d)", transform=ax.transAxes,
             ha="center", va="center", color="0.6")
-    fig.subplots_adjust(**FOURUP_ADJUST)
+    fig.subplots_adjust(**adjust)
     fig.savefig(FIGS / out)
     plt.close(fig)
     print(f"  wrote {out}")
@@ -161,6 +162,10 @@ def main():
           # one column: at this width a second column sits on the rising curves
           legend_kw=dict(fig3b_legend, ncol=1, labelspacing=0.2))
     placeholder_4up("fig4d_placeholder_4up.pdf")
+    # 2x2 variant (see GRID2_FIGSIZE): room for the compact two-column legend.
+    panel(fig3b, GRID2_FIGSIZE, "transacc_8_256_em_2x2.pdf", ymax=103, pad=None,
+          adjust=GRID2_ADJUST, legend_kw=fig3b_legend)
+    placeholder_4up("fig4d_placeholder_2x2.pdf", GRID2_FIGSIZE, GRID2_ADJUST)
 
     # ---- Fig 4b replacement: 1B, c=8 across tr, + c=2 contrast --------------
     cmap = plt.get_cmap("viridis")

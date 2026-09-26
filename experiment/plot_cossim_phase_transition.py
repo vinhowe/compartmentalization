@@ -17,7 +17,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from plot_baseline_val_curves import setup_paper_style, C_COLOR, FOURUP_FIGSIZE, FOURUP_ADJUST
+from plot_baseline_val_curves import (setup_paper_style, C_COLOR, FOURUP_FIGSIZE, FOURUP_ADJUST,
+                                      GRID2_FIGSIZE, GRID2_ADJUST)
 
 
 def load():
@@ -132,6 +133,18 @@ def main():
               borderpad=0.2, labelspacing=0.2)
     fig.subplots_adjust(**FOURUP_ADJUST)
     out = Path("../figures/tr_phase_no_wd_cossim_4up.pdf")
+    fig.savefig(out); print(f"  {out}"); plt.close(fig)
+
+    # 2x2 variant (see GRID2_FIGSIZE): same legend as the compact panel.
+    fig, ax = plt.subplots(figsize=GRID2_FIGSIZE)
+    panel_A(ax, cells)
+    ax.legend(loc="upper left",
+              frameon=True, facecolor="white", edgecolor="none",
+              framealpha=0.9,
+              handlelength=1.0, handletextpad=0.3, ncol=2,
+              columnspacing=0.6, borderpad=0.2)
+    fig.subplots_adjust(**GRID2_ADJUST)
+    out = Path("../figures/tr_phase_no_wd_cossim_2x2.pdf")
     fig.savefig(out); print(f"  {out}"); plt.close(fig)
 
     # §4.2 wd: 1x3 strip for c=5, 6, 8 (cossim), shared y; in-axis c-label.

@@ -38,6 +38,12 @@ from _run_paths import (
 FOURUP_FIGSIZE = (1.84, 2.0)
 FOURUP_ADJUST = dict(left=0.30, right=0.96, bottom=0.22, top=0.97)
 
+# 2x2 layout: each panel in a 0.49\textwidth subfigure, drawn at 3.3x2.3in like
+# the paper's other half-width panels (capacity sharing, multilingual), so text
+# prints at the same size as theirs. Fixed margins so the four axes align.
+GRID2_FIGSIZE = (3.3, 2.3)
+GRID2_ADJUST = dict(left=0.16, right=0.97, bottom=0.19, top=0.97)
+
 
 def setup_paper_style():
     rcParams.update({

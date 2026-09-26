@@ -22,7 +22,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from plot_baseline_val_curves import setup_paper_style, C_COLOR, FOURUP_FIGSIZE, FOURUP_ADJUST
+from plot_baseline_val_curves import (setup_paper_style, C_COLOR, FOURUP_FIGSIZE, FOURUP_ADJUST,
+                                      GRID2_FIGSIZE, GRID2_ADJUST)
 from _run_paths import C1_BASELINE_8_256
 
 
@@ -199,6 +200,17 @@ def main():
               columnspacing=0.4, borderpad=0.1)
     fig.subplots_adjust(**FOURUP_ADJUST)
     out = Path("../figures/tr_phase_no_wd_val_4up.pdf")
+    fig.savefig(out); print(f"  {out}"); plt.close(fig)
+
+    # 2x2 variant (see GRID2_FIGSIZE): wide enough for the compact legend.
+    fig, ax = plt.subplots(figsize=GRID2_FIGSIZE)
+    panel_A(ax, cells, c1_floor)
+    ax.legend(loc="lower left", bbox_to_anchor=(0, 0.05),
+              frameon=False, fontsize=7.3,
+              handlelength=1.0, handletextpad=0.3, ncol=4,
+              columnspacing=0.6, borderpad=0.2)
+    fig.subplots_adjust(**GRID2_ADJUST)
+    out = Path("../figures/tr_phase_no_wd_val_2x2.pdf")
     fig.savefig(out); print(f"  {out}"); plt.close(fig)
 
     # §4.2 wd: 1x3 strip for c=5, 6, 8 (val), shared y. Per-panel c-label as
