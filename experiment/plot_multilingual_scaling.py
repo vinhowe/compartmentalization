@@ -36,6 +36,13 @@ CONDITIONS = [
     ("en-only",       "tab:green",  "^"),
 ]
 
+# The first tuple element is BOTH the JSON key in multilingual_*_per_lang.json
+# and (previously) the legend text. Renaming it to match the paper's
+# "compartmentalized" would make data.get(cond) return [], empty the
+# common-step intersection, and silently drop the condition from the chart --
+# so the key stays as-is and only the displayed string is remapped.
+DISPLAY = {"compartmented": "compartmentalized"}
+
 
 def scale_label(label, params_m):
     return f"{params_m:.0f}M" if params_m < 1000 else f"{params_m/1000:.2g}B"
@@ -73,7 +80,7 @@ def plot_lang_into(ax, finals, lang_idx, lang_label):
         xs = [r[1] for r in rows]
         ys = [r[lang_idx] for r in rows]
         ax.plot(xs, ys, color=color, marker=marker, markersize=5,
-                linewidth=1.2, label=cond)
+                linewidth=1.2, label=DISPLAY.get(cond, cond))
     ax.set_xscale("log")
     xs = [r[1] for r in finals["shared"]]
     ax.set_xticks(xs)

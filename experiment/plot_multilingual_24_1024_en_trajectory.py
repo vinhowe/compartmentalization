@@ -23,6 +23,11 @@ CONDITIONS = [
     ("en-only",       "tab:green",  "^"),
 ]
 
+# First element doubles as the JSON key in multilingual_24_1024_per_lang.json
+# (see data.get(label) below), so only the displayed string is remapped --
+# renaming the key would silently drop the condition from the plot.
+DISPLAY = {"compartmented": "compartmentalized"}
+
 
 def main():
     setup_paper_style()
@@ -35,7 +40,7 @@ def main():
         steps = [r["step"] for r in rows]
         en = [r["en"] for r in rows]
         ax.plot(steps, en, color=color, marker=marker, markersize=3,
-                linewidth=1.2, label=label)
+                linewidth=1.2, label=DISPLAY.get(label, label))
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("Step")
